@@ -640,7 +640,8 @@ def encode_scenes(input_video, specs, orig_w, orig_h, out_w, out_h, fps,
 
 
 def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
-           force_strategy=None, crop_overrides=None, watermark=False):
+           force_strategy=None, crop_overrides=None, watermark=False,
+           inset_hint=None):
     """Full v2 reframe of one clip. Raises on failure (caller falls back).
 
     ``content_ranges`` pins which stretches (in this clip's timeline) show a
@@ -661,6 +662,12 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
     ``watermark`` overlays the free-plan mark (main.watermark_filter) in every
     segment's own encode, instead of main.apply_watermark re-encoding the
     finished clip once more.
+
+    ``inset_hint``: a webcam box recorded for this source (job metadata's
+    ``inset_box``). An OBS composite column is constant for a whole stream,
+    but a dim segment can defeat per-clip face detection; the hint lets
+    ``camera_inset.detect`` adopt the recorded box after the detectors
+    re-confirm it on this clip (see _confirm_fallback).
     """
     import main as m
     content_ranges = content_ranges or []
@@ -687,6 +694,15 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
     # whole frame into the middle of a blurred copy of itself. Skip the
     # classifier and every layout upgrade instead of trying to survive them.
     passthrough = source_already_fits(orig_w, orig_h, aspect_ratio)
+    inset_forced = force_strategy == 'full'
+    if inset_forced:
+        # 'full' means the template band-stack (screen whole + enlarged cam):
+        # the scenes the webcam is really in get INSET, the rest WIDE. Not a
+        # plain 'WIDE' stamp — a forced WIDE renders the raw source band and
+        # its baked-in cam/chat column reappears in the game band (job
+        # 85ca7d9d rerenders, 19-oct-2026). Detect below still runs so a
+        # scene the camera left keeps an honest WIDE.
+        force_strategy = None
     if force_strategy:
         strategies = [force_strategy] * len(scenes)
         content_ranges = []  # no screencast/inset upgrades over an explicit choice
@@ -747,11 +763,14 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
     # the question "is there an inset" is settled geometrically rather than by
     # asking Gemini: offered as a fourth choice it answered "screencast" on all
     # five clips that had one, while camera_inset.detect finds all five with no
-    # false positives. The box is fixed for the whole video, so it is found once.
+    # false positives. The box is fixed for the whole video, so it is found
+    # once. A forced render skips the search: force_strategy is the editor's
+    # whole-clip choice, and no auto layout may override an explicit pick
+    # (the same reason render() empties content_ranges under a force).
     inset = None
-    if content_ranges and screencast_layout.ENABLED:
+    if screencast_layout.ENABLED and not passthrough and not force_strategy:
         try:
-            inset = camera_inset.detect(input_video)
+            inset = camera_inset.detect(input_video, fallback_box=inset_hint)
         except Exception as e:
             print(f"   ⚠️ Inset check failed ({e}) — using the screen layouts.")
         if inset:
@@ -762,9 +781,12 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
     insets = {}
     wide_count = 0
     inset_count = 0
-    if content_ranges:
-        for scene_idx, (plan, centre) in screencast_layout.detect_screencast_scenes(
-                input_video, scenes, strategies, content_ranges).items():
+    if content_ranges or (inset and screencast_layout.ENABLED):
+        upgrade_scenes = screencast_layout.detect_screencast_scenes(
+            input_video, scenes, strategies,
+            content_ranges or screencast_layout.fallback_ranges(
+                scenes, strategies, fps))
+        for scene_idx, (plan, centre) in upgrade_scenes.items():
             # An inset beats both screen plans: it is the only one that can show
             # the screen whole AND the person at a readable size. But only on
             # the scenes the camera is actually in: the box is found once per
@@ -798,8 +820,51 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
                 if not crop:
                     crop = _wide_crop(input_video, orig_w, orig_h, out_w, out_h,
                                       start_f, end_f, centre)
+                elif inset and camera_inset.is_composite_column(
+                        inset, orig_w, orig_h):
+                    # (prizm fork merge) OBS composite: the focus crop's left padding reaches
+                    # into the baked-in cam/chat column, and chat text
+                    # reappears in the band (clip 1, job 85ca7d9d). Clamp the
+                    # crop to the same game region the INSET path uses —
+                    # keep the width, aligned to the right edge, so the
+                    # reading area stays where it is. Only when a real focus
+                    # crop exists; the _wide_crop fallback path is untouched.
+                    game_x = inset[0] + inset[2] + int(
+                        round(camera_inset.COMPOSITE_MARGIN_W * orig_w))
+                    if crop[0] < game_x:
+                        x = min(game_x, orig_w - 2)
+                        w = min(crop[1], orig_w - x - (orig_w - x) % 2)
+                        if w >= orig_w * 0.4:
+                            crop = (x, w)
                 if crop:
                     focus_crops[start_f] = crop
+
+    # Second pass — the fallback rescue the loop above cannot do. Without a
+    # GEMINI key the screen ranges come from fallback_ranges(), which names
+    # face-less GENERAL scenes only. A screencast scene whose tiny webcam
+    # bubble the face detector DOES catch at analysis scale is classified
+    # TRACK instead — the bubble's own face — so it carries no range, the
+    # loop never sees it, and the TRACK crop slices the webcam off the
+    # frame edge. Measured on the same Windwaker source: job 95708adc's
+    # bubble scenes classified GENERAL and rendered INSET (that batch
+    # became the template), while 206f3d79's clips 2/3/7 classified TRACK
+    # and came out sliced — the layout hinged on which side of the detector
+    # threshold the corner face landed. This pass removes the coin-flip:
+    # any scene still TRACK/GENERAL gets INSET when the bubble is really
+    # there (present_in_scene verifies geometrically, per scene, so a
+    # clip that mixes shots never band-crops a scene the camera left).
+    # Scenes another layout claimed are excluded by the strategy check;
+    # forced and passthrough renders never arrive here (inset stays None).
+    if inset:
+        for scene_idx, (start_f, end_f) in enumerate(scene_boundaries):
+            if strategies[scene_idx] not in ('TRACK', 'GENERAL'):
+                continue
+            if camera_inset.present_in_scene(
+                    input_video, inset, start_f, end_f):
+                strategies[scene_idx] = 'INSET'
+                splits.pop(start_f, None)
+                insets[start_f] = inset
+                inset_count += 1
     if screencasts:
         print(f"   🖥️ SCREENCAST layout on {len(screencasts)} scene(s)")
     if wide_count:

@@ -191,11 +191,19 @@ def usable(box, frame_h, min_ratio=MIN_INSET_HEIGHT, max_ratio=MAX_INSET_HEIGHT)
     return min_ratio * frame_h <= box[3] <= max_ratio * frame_h
 
 
-def detect(video_path, samples=10):
+def detect(video_path, samples=10, fallback_box=None):
     """Median inset rectangle across sampled frames, or None.
 
-    None means "no usable inset here", which callers must treat as "use another
-    layout" rather than as an error.
+    None means "no usable inset here", which callers must treat as "use
+    another layout" rather than as an error.
+
+    ``fallback_box``: a box recorded for this source earlier (an OBS composite
+    column is constant for a whole stream, so a job that already detected it
+    on the full source keeps it across per-clip renders). Adopted only when
+    the detectors confirm the webcam is still there — on the very clip whose
+    dim lighting made ``detect`` fail (job 85ca7d9d clip_1) the crop-zoom
+    rescue in ``present_in_scene`` still finds the person, so the check is
+    real evidence, not a rubber stamp.
     """
     import cv2
     import numpy as np
@@ -237,9 +245,44 @@ def detect(video_path, samples=10):
         cap.release()
 
     if len(boxes) < max(3, samples // 3):
-        return None
+        return _confirm_fallback(video_path, frame_w, frame_h, fallback_box)
 
-    return stable_box(boxes, frame_w, frame_h)
+    found = stable_box(boxes, frame_w, frame_h)
+    if found:
+        return found
+    return _confirm_fallback(video_path, frame_w, frame_h, fallback_box)
+
+
+def _confirm_fallback(video_path, frame_w, frame_h, fallback_box):
+    """Validate a recorded box for this source when fresh detection fails.
+
+    The OBS composite column is baked into the stream recording, so the box
+    detected on the full source stays correct for any clip cut from it — but
+    only while the camera really sits in it in THIS clip. ``present_in_scene``
+    supplies that proof with a single source of truth (the same detectors the
+    fresh path uses); a clip the camera left never adopts the fallback.
+    """
+    if not fallback_box or len(fallback_box) != 4:
+        return None
+    box = tuple(int(round(v)) for v in fallback_box)
+    x, y, w, h = box
+    if x < 0 or y < 0 or w <= 0 or h <= 0:
+        return None
+    if x + w > frame_w or y + h > frame_h:
+        return None
+    if not is_composite_column(box, frame_w, frame_h):
+        # Fallbacks only ever carry composite columns (job metadata's
+        # ``inset_box``); a stored bubble box must not bypass fresh detection
+        # because bubbles move and the recorder may reposition them.
+        return None
+    import cv2
+    cap = cv2.VideoCapture(video_path)
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if cap.isOpened() else 0
+    cap.release()
+    if total <= 0 or not present_in_scene(video_path, box, 0, max(total - 1, 1)):
+        return None
+    print(f"   📹 Webcam inset (from job record): {box}")
+    return box
 
 
 def stable_box(boxes, frame_w, frame_h, min_agree=3):
@@ -384,12 +427,88 @@ def present_in_scene(video_path, box, start_f, end_f, samples=3):
                 dets = [person] if person else []
             if any(_centre_inside(d, box, slack) for d in dets):
                 hits += 1
+            else:
+                # Crop-zoom rescue: the cam face is plainly visible to a human
+                # yet both detectors miss it — measured on job a99e1bf5 (the
+                # 15-oct-2026 Windwaker QA batch): every sampled frame of
+                # clip_8 (VOD 3004-3062s) and clip_7's back half (2573-2599s)
+                # shows her face in the bubble, and present_in_scene still
+                # returned 0/3 hits, so those scenes rendered WIDE and the
+                # batch missed the template. Two stacked causes: BlazeFace
+                # misses the ~60px, low-light, angled cam face even at full
+                # resolution, and detect_person_yolo scales the whole 1920px
+                # frame to DETECT_MAX_WIDTH=640 first, so the ~280px bubble
+                # is ~9px of person at inference scale — nothing to find. The
+                # same ladder the codebase already climbed for faces (640 ->
+                # full-res, see detect_faces_full_res) applied one rung
+                # further: crop the frame to the inset box and upscale it
+                # ~3x BEFORE detection, then map any hit back to full-frame
+                # coords. A scene whose camera truly left shows the video's
+                # background there, and a zoomed background grows no face.
+                x, y, w, h = [int(round(v)) for v in box]
+                fh, fw = frame.shape[:2]
+                x = max(0, x); y = max(0, y)
+                w = max(8, min(w, fw - x)); h = max(8, min(h, fh - y))
+                crop = frame[y:y + h, x:x + w]
+                if crop.size:
+                    scale = 3.0
+                    big = cv2.resize(crop, (int(w * scale), int(h * scale)),
+                                     interpolation=cv2.INTER_CUBIC)
+                    zoom_dets = [c['box'] for c in
+                                 screencast_layout.detect_faces_full_res(big)]
+                    if not zoom_dets:
+                        person = m.detect_person_yolo(big)
+                        zoom_dets = [person] if person else []
+                    for d in zoom_dets:
+                        # Map the zoomed-crop detection back to full-frame
+                        # coordinates before the centre test; detect() found
+                        # the box in these same coordinates.
+                        d[0] = x + d[0] / scale
+                        d[1] = y + d[1] / scale
+                        d[2] = d[2] / scale
+                        d[3] = d[3] / scale
+                        if _centre_inside(d, box, slack):
+                            hits += 1
+                            break
     finally:
         cap.release()
     return hits * 2 > samples
 
 
 MAX_CAMERA_RATIO = 0.40
+
+# An OBS-composite source is a stream recording where the layout is baked in:
+# a large left column holds the webcam (and often the chat under it) flush
+# against the left edge, and the game capture sits beside it as a *window*,
+# not fullscreen (job 85ca7d9d, 18-oct-2026: 1280x720, box (0,199,376,211) =
+# flush-left, 29.4% of the width). Scaling that frame whole into the screen
+# band shrinks the game to a stamp AND bakes chat text into every Short.
+# A bubble-cam source (the template batch, 95708adc) also touches a corner,
+# but its cam is <20% of the width and the game fills the whole frame —
+# whole-frame scaling stays correct there. The width test is what separates
+# the two: 0.20 is far above the template batch's bubbles (measured 0.13-0.16)
+# and far below this composite (0.294).
+COMPOSITE_MIN_WIDTH = 0.20
+COMPOSITE_FLUSH_X = 0.02   # box.x this close to the left edge = flush
+# Game-crop margin past the column. 0.01 was measured against a single t=2614
+# frame, but the detected column edge wobbles ±40px per scene (dim chat rows
+# shrink the box), so 356 < 388 (the stable chat-column edge) on small boxes —
+# Twitch chat reappeared at the band edge (job 85ca7d9d clips 9/10, 19-oct).
+# 0.045 keeps game_x ≥ 396 for boxes down to w=351: past the 388 edge at every
+# wobble sampled, and only ~2.9% more source width given up.
+COMPOSITE_MARGIN_W = 0.045
+COMPOSITE_CAM_RATIO = 0.18  # cam band share of the frame (template ≈ 340/1920)
+
+
+def is_composite_column(box, orig_w, orig_h):
+    """True when ``box`` is the left column of an OBS composite layout."""
+    x, y, w, h = box
+    return (x <= COMPOSITE_FLUSH_X * orig_w
+            and w >= COMPOSITE_MIN_WIDTH * orig_w
+            # A column is taller than the 16:9 cam it encloses: the chat
+            # underneath extends it (measured 0.293 height on 0.294 width.
+            # A pure corner bubble of this width would be ~16:9, 0.165 tall).
+            and h >= 0.22 * orig_h)
 
 
 def inset_filtergraph(orig_w, orig_h, out_w, out_h, box, camera_ratio=None):
@@ -399,31 +518,60 @@ def inset_filtergraph(orig_w, orig_h, out_w, out_h, box, camera_ratio=None):
     desktop puts what matters at the edges. The inset is scaled up so the person
     reads at a size the source never gave them.
 
-    The camera band takes its height from the INSET'S OWN aspect ratio rather
-    than a fixed share of the frame. A fixed share was tried first and stretched
-    every face sideways: a 16:9 inset forced into a 2:1 band is a 12% horizontal
-    stretch, and it is immediately visible on a face.
+    OBS-composite sources (see is_composite_column) get a different screen
+    band: the GAME REGION right of the baked-in cam/chat column is cropped
+    and scaled to fill the band, instead of scaling the whole frame (job
+    85ca7d9d — whole-frame scaling stamped the game and baked chat text into
+    every clip; game-region crop x ≥ 388/1280 measured clean and full-bleed
+    at t=2614, with only 10-15px of chat text at the edge at t=702, covered
+    by the +1%W margin). The screen keeps its whole width in both modes.
     """
     box_w = max(2, box[2])
     box_h = max(2, box[3])
 
+    composite = is_composite_column(box, orig_w, orig_h)
+
     if camera_ratio is not None:
         cam_h = int(out_h * camera_ratio)
+    elif composite:
+        # The composite column's box is wider than 16:9 tall (chat extends it
+        # below the cam), so the box-aspect height would be a 606px monster
+        # band (measured). The template's cam band is ≈ 340/1920 = 0.18 of the
+        # frame; the enlarged cam overflows it and gets centre-cropped below.
+        cam_h = int(out_h * COMPOSITE_CAM_RATIO)
     else:
         cam_h = int(round(out_w * box_h / float(box_w)))
     cam_h = min(cam_h, int(out_h * MAX_CAMERA_RATIO))
     cam_h -= cam_h % 2
 
-    screen_h = int(round(out_w * orig_h / float(orig_w)))
-    screen_h -= screen_h % 2
-    screen_h = max(2, min(screen_h, out_h - cam_h - 2))
+    if composite:
+        # Game region: everything right of the baked-in cam/chat column plus
+        # 1% of the width of margin (the measured chat bleed). Uniform scale
+        # into the band: game 891x720 -> 1080 wide -> 876-tall band.
+        game_x = box[0] + box[2] + int(round(COMPOSITE_MARGIN_W * orig_w))
+        game_w = orig_w - game_x
+        screen_h = int(round(out_w * orig_h / float(game_w)))
+        screen_h -= screen_h % 2
+        screen_h = max(2, min(screen_h, out_h - cam_h - 2))
+        screen_crop = (f"crop=w={game_w}:h={orig_h}:x={game_x}:y=0,"
+                       f"scale={out_w}:{screen_h}")
+    else:
+        screen_h = int(round(out_w * orig_h / float(orig_w)))
+        screen_h -= screen_h % 2
+        screen_h = max(2, min(screen_h, out_h - cam_h - 2))
+        screen_crop = f"scale={out_w}:{screen_h}"
 
     # Widen (or heighten) the crop to the band's aspect so the scale below is
     # uniform. Clamped to the frame, so an inset hard against an edge simply
-    # keeps whatever it can reach.
+    # keeps whatever it can reach. In composite mode the centre-crop later in
+    # the chain already resolves the aspect mismatch, and widening to the band
+    # aspect (3:1) would sweep gameplay into the cam crop — keep the box as
+    # the detect stage found it.
     target_aspect = out_w / float(cam_h)
     x, y, w, h = box
-    if w / float(h) < target_aspect:
+    if composite:
+        pass  # box stays as detected; the centre-crop resolves aspect later
+    elif w / float(h) < target_aspect:
         want_w = min(orig_w, int(round(h * target_aspect)))
         x = int(round(x + w / 2.0 - want_w / 2.0))
         w = want_w
@@ -441,14 +589,26 @@ def inset_filtergraph(orig_w, orig_h, out_w, out_h, box, camera_ratio=None):
 
     filler_h = out_h - screen_h - cam_h
 
+    if composite:
+        # The band is narrower in aspect than the cam's source region: filling
+        # 1080x346 from a 376x210 crop means uniform-scale to the band width
+        # (tall intermediate) and centre-crop the overflow height, so the face
+        # keeps its middle (proven render at 2614s: face reads large, no chat).
+        cam_chain = (
+            f"[ca]crop=w={w}:h={h}:x={x}:y={y},scale={out_w}:-2,"
+            f"crop={out_w}:{cam_h}[cam]")
+    else:
+        cam_chain = (
+            f"[ca]crop=w={w}:h={h}:x={x}:y={y},scale={out_w}:{cam_h}[cam]")
+
     return (
         f"[0:v]split=3[bga][sa][ca];"
         # Blurred backdrop so the leftover strip is not a black bar. Scaled by
         # HEIGHT: scaling a 16:9 source to 1080 wide gives 608 tall, and there
         # is no 1920-tall crop to take out of that.
         f"[bga]{blurred_backdrop(out_w, out_h, 14)}[bg];"
-        f"[sa]scale={out_w}:{screen_h}[screen];"
-        f"[ca]crop=w={w}:h={h}:x={x}:y={y},scale={out_w}:{cam_h}[cam];"
+        f"[sa]{screen_crop}[screen];"
+        f"{cam_chain};"
         f"[bg][screen]overlay=x=0:y={filler_h // 2}[withscreen];"
         f"[withscreen][cam]overlay=x=0:y={filler_h // 2 + screen_h},"
         f"setsar=1[v]"
