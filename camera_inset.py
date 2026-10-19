@@ -534,11 +534,13 @@ def inset_filtergraph(orig_w, orig_h, out_w, out_h, box, camera_ratio=None):
     if camera_ratio is not None:
         cam_h = int(out_h * camera_ratio)
     elif composite:
-        # The composite column's box is wider than 16:9 tall (chat extends it
-        # below the cam), so the box-aspect height would be a 606px monster
-        # band (measured). The template's cam band is ≈ 340/1920 = 0.18 of the
-        # frame; the enlarged cam overflows it and gets centre-cropped below.
-        cam_h = int(out_h * COMPOSITE_CAM_RATIO)
+        # The composite column carries the cam window whole: honour its box
+        # aspect (≈0.32 of a 1080p frame on job 85ca7d9d) instead of the
+        # template's 0.18 stamp — that ratio was measured on FULLSCREEN
+        # sources with a 0.13-0.16 cam bubble. Stamping 0.18 and centre-
+        # cropping the overflow amputated forehead + chin on close-up cams
+        # (Ema: "half my face is gone", 19-oct). MAX_CAMERA_RATIO still caps.
+        cam_h = int(round(out_w * box_h / float(box_w)))
     else:
         cam_h = int(round(out_w * box_h / float(box_w)))
     cam_h = min(cam_h, int(out_h * MAX_CAMERA_RATIO))
@@ -563,14 +565,13 @@ def inset_filtergraph(orig_w, orig_h, out_w, out_h, box, camera_ratio=None):
 
     # Widen (or heighten) the crop to the band's aspect so the scale below is
     # uniform. Clamped to the frame, so an inset hard against an edge simply
-    # keeps whatever it can reach. In composite mode the centre-crop later in
-    # the chain already resolves the aspect mismatch, and widening to the band
-    # aspect (3:1) would sweep gameplay into the cam crop — keep the box as
-    # the detect stage found it.
+    # keeps whatever it can reach. In composite mode the box-aspect band now
+    # matches the box exactly, and widening to the target aspect (3:1 old
+    # band) would sweep gameplay into the cam crop — keep the box as found.
     target_aspect = out_w / float(cam_h)
     x, y, w, h = box
     if composite:
-        pass  # box stays as detected; the centre-crop resolves aspect later
+        pass  # box aspect == band aspect now; nothing to widen
     elif w / float(h) < target_aspect:
         want_w = min(orig_w, int(round(h * target_aspect)))
         x = int(round(x + w / 2.0 - want_w / 2.0))
@@ -590,13 +591,12 @@ def inset_filtergraph(orig_w, orig_h, out_w, out_h, box, camera_ratio=None):
     filler_h = out_h - screen_h - cam_h
 
     if composite:
-        # The band is narrower in aspect than the cam's source region: filling
-        # 1080x346 from a 376x210 crop means uniform-scale to the band width
-        # (tall intermediate) and centre-crop the overflow height, so the face
-        # keeps its middle (proven render at 2614s: face reads large, no chat).
+        # The band now matches the box aspect (no overflow to trim), so this
+        # is the plain scale. The old centre-crop version (scale -2 then
+        # crop={out_w}:{cam_h}) kept only the middle ~57% of a close-up cam —
+        # forehead + chin amputated (job 85ca7d9d, Ema 19-oct).
         cam_chain = (
-            f"[ca]crop=w={w}:h={h}:x={x}:y={y},scale={out_w}:-2,"
-            f"crop={out_w}:{cam_h}[cam]")
+            f"[ca]crop=w={w}:h={h}:x={x}:y={y},scale={out_w}:{cam_h}[cam]")
     else:
         cam_chain = (
             f"[ca]crop=w={w}:h={h}:x={x}:y={y},scale={out_w}:{cam_h}[cam]")
