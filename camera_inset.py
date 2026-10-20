@@ -477,6 +477,15 @@ def present_in_scene(video_path, box, start_f, end_f, samples=3):
 
 MAX_CAMERA_RATIO = 0.40
 
+# A small corner-bubble cam scaled to the template's full-width band is a
+# huge magnification (job 6aa5bdae: bubble ~26% of a 1280x720 source →
+# 1080px wide ≈ 3.9x — the face filled ~70% of the finished Short). Cap the
+# bubble magnification and centre the panel in its band; the blurred
+# backdrop fills the sides (floating-cam-card look). Fullscreen/template
+# sources with big cams never exceed the cap, so they render unchanged.
+SMALL_BUBBLE_W = 0.55   # cam bubble narrower than this share of the source
+CAM_MAG_CAP = 2.2       # panel scale = min(out_w / box_w, CAM_MAG_CAP)
+
 # An OBS-composite source is a stream recording where the layout is baked in:
 # a large left column holds the webcam (and often the chat under it) flush
 # against the left edge, and the game capture sits beside it as a *window*,
@@ -544,7 +553,18 @@ def inset_filtergraph(orig_w, orig_h, out_w, out_h, box, camera_ratio=None):
     else:
         cam_h = int(round(out_w * box_h / float(box_w)))
     cam_h = min(cam_h, int(out_h * MAX_CAMERA_RATIO))
+
+    # Small-bubble cam: honour the magnification cap. The band shrinks to the
+    # panel's height and the panel is centred inside it (no aspect squash, no
+    # overflow crop); the blurred backdrop fills the rest of the band width.
+    cam_panel_w = None
+    if (not composite and box_w < SMALL_BUBBLE_W * orig_w
+            and out_w / float(box_w) > CAM_MAG_CAP):
+        cam_h = int(round(box_h * CAM_MAG_CAP))
+        cam_panel_w = int(round(box_w * CAM_MAG_CAP))
     cam_h -= cam_h % 2
+    if cam_panel_w is not None:
+        cam_panel_w -= cam_panel_w % 2
 
     if composite:
         # Game region: everything right of the baked-in cam/chat column plus
@@ -590,16 +610,18 @@ def inset_filtergraph(orig_w, orig_h, out_w, out_h, box, camera_ratio=None):
 
     filler_h = out_h - screen_h - cam_h
 
-    if composite:
-        # The band now matches the box aspect (no overflow to trim), so this
-        # is the plain scale. The old centre-crop version (scale -2 then
-        # crop={out_w}:{cam_h}) kept only the middle ~57% of a close-up cam —
-        # forehead + chin amputated (job 85ca7d9d, Ema 19-oct).
+    # Composites match the band aspect exactly; capped small bubbles scale to
+    # the panel and centre inside the band (blurred backdrop on the sides);
+    # everything else fills the band edge-to-edge.
+    if cam_panel_w is not None:
         cam_chain = (
-            f"[ca]crop=w={w}:h={h}:x={x}:y={y},scale={out_w}:{cam_h}[cam]")
+            f"[ca]crop=w={w}:h={h}:x={x}:y={y},scale={cam_panel_w}:{cam_h}"
+            f"[cam]")
+        cam_x = (out_w - cam_panel_w) // 2
     else:
         cam_chain = (
             f"[ca]crop=w={w}:h={h}:x={x}:y={y},scale={out_w}:{cam_h}[cam]")
+        cam_x = 0
 
     return (
         f"[0:v]split=3[bga][sa][ca];"
@@ -610,6 +632,6 @@ def inset_filtergraph(orig_w, orig_h, out_w, out_h, box, camera_ratio=None):
         f"[sa]{screen_crop}[screen];"
         f"{cam_chain};"
         f"[bg][screen]overlay=x=0:y={filler_h // 2}[withscreen];"
-        f"[withscreen][cam]overlay=x=0:y={filler_h // 2 + screen_h},"
+        f"[withscreen][cam]overlay=x={cam_x}:y={filler_h // 2 + screen_h},"
         f"setsar=1[v]"
     )
