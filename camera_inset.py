@@ -554,17 +554,12 @@ def inset_filtergraph(orig_w, orig_h, out_w, out_h, box, camera_ratio=None):
         cam_h = int(round(out_w * box_h / float(box_w)))
     cam_h = min(cam_h, int(out_h * MAX_CAMERA_RATIO))
 
-    # Small-bubble cam: honour the magnification cap. The band shrinks to the
-    # panel's height and the panel is centred inside it (no aspect squash, no
-    # overflow crop); the blurred backdrop fills the rest of the band width.
-    cam_panel_w = None
-    if (not composite and box_w < SMALL_BUBBLE_W * orig_w
-            and out_w / float(box_w) > CAM_MAG_CAP):
-        cam_h = int(round(box_h * CAM_MAG_CAP))
-        cam_panel_w = int(round(box_w * CAM_MAG_CAP))
+    # Small-bubble cam: honour the magnification cap (see SMALL_BUBBLE_W).
+    # Classification uses the *detected bubble*; the panel size is decided
+    # after the widen/aspect block below, against the crop actually used, so
+    # a widened crop never gets squashed by the panel scale.
+    small_bubble = not composite and box_w < SMALL_BUBBLE_W * orig_w
     cam_h -= cam_h % 2
-    if cam_panel_w is not None:
-        cam_panel_w -= cam_panel_w % 2
 
     if composite:
         # Game region: everything right of the baked-in cam/chat column plus
@@ -613,6 +608,16 @@ def inset_filtergraph(orig_w, orig_h, out_w, out_h, box, camera_ratio=None):
     # Composites match the band aspect exactly; capped small bubbles scale to
     # the panel and centre inside the band (blurred backdrop on the sides);
     # everything else fills the band edge-to-edge.
+    # Composites match the band aspect exactly; capped small bubbles scale to
+    # the panel and centre inside the band (blurred backdrop on the sides);
+    # everything else fills the band edge-to-edge. The cap is judged on the
+    # FINAL crop (post-widen): crop_mag = out_w / w.
+    cam_panel_w = None
+    if small_bubble and out_w / float(w) > CAM_MAG_CAP:
+        cam_h = int(round(h * CAM_MAG_CAP))
+        cam_panel_w = int(round(w * CAM_MAG_CAP))
+        cam_h -= cam_h % 2
+        cam_panel_w -= cam_panel_w % 2
     if cam_panel_w is not None:
         cam_chain = (
             f"[ca]crop=w={w}:h={h}:x={x}:y={y},scale={cam_panel_w}:{cam_h}"
