@@ -234,7 +234,25 @@ def generate_srt(transcript, clip_start, clip_end, output_path, max_chars=20, ma
 # and Reels' own bottom UI — the caption/username block and the music ticker —
 # where they were partly covered on the platform even though the exported file
 # looked fine.
-SAFE_MARGIN_V = 43
+# ``CAPTION_FONT_SIZE`` / ``CAPTION_MARGIN_V`` env vars override them per
+# deployment (Lumi patch, 2026-10-15): 28px captions pushed closer to the
+# bottom edge — Ema's template. Sizes are clamped to sane caption range.
+try:  # .env may not be loaded yet at import time (app.py loads it later)
+    from dotenv import load_dotenv as _ld
+    _ld()
+except Exception:
+    pass
+_MARGIN_RAW = os.environ.get("CAPTION_MARGIN_V", "").strip()
+try:
+    SAFE_MARGIN_V = max(0, min(200, int(_MARGIN_RAW))) if _MARGIN_RAW else 43
+except ValueError:
+    SAFE_MARGIN_V = 43
+
+_SIZE_RAW = str(os.environ.get("CAPTION_FONT_SIZE", "")).strip()
+try:
+    _DEFAULT_SIZE = max(10, min(200, int(_SIZE_RAW))) if _SIZE_RAW else 44
+except ValueError:
+    _DEFAULT_SIZE = 44
 
 
 # The caption look applied automatically to every generated clip. Chosen by

@@ -500,6 +500,13 @@ COMPOSITE_MARGIN_W = 0.045
 COMPOSITE_CAM_RATIO = 0.18  # cam band share of the frame (template ≈ 340/1920)
 
 
+SMALL_BUBBLE_W = 0.55   # cam bubble narrower than this share of the source
+# Body-inclusive crop growth for small bubbles: the face box * 1.55 downward
+# pull (net height 1.5x box + 5% headroom shift up). Measured: the scary-game
+# bubble's person spans head → mid-chest = ~1.5x the face bbox.
+BODY_GROW_V = 1.55
+
+
 def is_composite_column(box, orig_w, orig_h):
     """True when ``box`` is the left column of an OBS composite layout."""
     x, y, w, h = box
@@ -528,6 +535,7 @@ def inset_filtergraph(orig_w, orig_h, out_w, out_h, box, camera_ratio=None):
     """
     box_w = max(2, box[2])
     box_h = max(2, box[3])
+    y0 = max(0, int(box[1]))  # body-growth clamp needs the box top
 
     composite = is_composite_column(box, orig_w, orig_h)
 
@@ -568,8 +576,22 @@ def inset_filtergraph(orig_w, orig_h, out_w, out_h, box, camera_ratio=None):
     # keeps whatever it can reach. In composite mode the box-aspect band now
     # matches the box exactly, and widening to the target aspect (3:1 old
     # band) would sweep gameplay into the cam crop — keep the box as found.
+    # Small corner bubbles detect TIGHT to the face (the detector returns a
+    # face bbox, not the cam window): the source bubble actually carries
+    # head→mid-chest, and an aspect-fit face box renders head-only with the
+    # chin at the band's bottom edge (job 6aa5bdae, Ema: "show more of the
+    # body"). Grow the crop downward — where the body actually is — then
+    # aspect-fit below. Net effect at 1080p: zoom drops from ~3.2x to ~2x,
+    # the band still fills edge-to-edge, no card look.
+    small_bubble = box_w < SMALL_BUBBLE_W * orig_w
+    if small_bubble and not composite:
+        box_h = int(round(box_h * BODY_GROW_V))  # +body below the face box
+        box_h = min(box_h, orig_h - y0 - 4)      # keep the crop in frame
+
     target_aspect = out_w / float(cam_h)
     x, y, w, h = box
+    h = box_h  # body-grown above for small bubbles
+
     if composite:
         pass  # box aspect == band aspect now; nothing to widen
     elif w / float(h) < target_aspect:

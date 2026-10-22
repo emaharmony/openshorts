@@ -1759,7 +1759,7 @@ CAPTION_STYLE_FIELDS = (
     "style", "position", "font_size", "font_name", "font_color",
     "border_color", "border_width", "bg_color", "bg_opacity",
     "highlight_color", "effect", "base_opacity", "uppercase", "reveal",
-    "shadow", "max_chars", "max_duration")
+    "shadow", "max_chars", "max_duration", "margin_v")
 
 
 def _words_transcript(words, language="en"):
@@ -1798,6 +1798,8 @@ def _burn_caption_style(video_path, out_path, sub_path, transcript, start, end,
             bg_opacity=s["bg_opacity"], effect=s["effect"],
             base_opacity=s["base_opacity"], uppercase=s["uppercase"],
             reveal=s["reveal"], shadow=s["shadow"])
+        if s.get("margin_v") is not None:
+            opts["margin_v"] = s["margin_v"]
         if max_chars is not None:
             opts["max_chars"] = max_chars
         if max_duration is not None:
@@ -7404,6 +7406,14 @@ class SubtitleRequest(BaseModel):
     # keeps the generator's defaults, which is what old clients send.
     max_chars: Optional[int] = None
     max_duration: Optional[float] = None
+    # PlayResY-288 margin from the bottom edge for the caption block. None
+    # keeps the deployment default (SAFE_MARGIN_V = 28 -> ~187px real on the
+    # 1920 frame). Safe-zone research (Meta Reels guide: keep the bottom 35%
+    # clear; filmscribe 2026 TikTok measurement: handle+description+sound
+    # cover the bottom ~484px; daohuy practitioner: button stack ~180px,
+    # description ~350px) puts the OPTIMAL burn margin at ~350px real ->
+    # PlayRes ~52. Anything lower collides with TikTok's description text.
+    margin_v: Optional[int] = None
     # Named look (subtitles.CAPTION_PRESETS); any field sent explicitly
     # alongside it overrides that field of the preset.
     preset: Optional[str] = None
@@ -7604,10 +7614,14 @@ class RerenderRequest(BaseModel):
     framing: Optional[str] = None
 
 
-# Manual framing -> reframe-engine strategy. 'full' shows the whole source
-# frame (WIDE: no side-cropping, blurred filler bands); 'track' forces the
-# subject-tracking crop. Anything non-auto needs the retained source video.
-_FRAMING_STRATEGIES = {"auto": None, "full": "WIDE", "track": "TRACK"}
+# Manual framing -> reframe-engine strategy. 'track' forces the subject-tracking
+# crop. 'full' is the composite band-stack look (screen whole + enlarged cam,
+# the template look): the reframe engine maps it to per-scene INSET where the
+# webcam is really present and WIDE elsewhere — a plain 'WIDE' stamp would
+# render the raw band and put a composite source's baked-in cam/chat column
+# back into the game band (job 85ca7d9d rerenders, 19-oct-2026).
+# Anything non-auto needs the retained source video.
+_FRAMING_STRATEGIES = {"auto": None, "full": "full", "track": "TRACK"}
 
 
 # One lock per job (same pattern as _restore_locks): rerenders on the same job
@@ -7744,6 +7758,12 @@ async def _rerender_locked(req: RerenderRequest, request: Request, job):
             force_strategy=force_strategy,
             captions_transcript=v_transcript,
             captioner=_recut_captioner(clip),
+            # The job's own layouts, so a reframe inside the backend process
+            # keeps the layout gates the spawned job child had (see the note
+            # in recut.perform_recut's render closure and recut.py's module
+            # layout_env_runtime.py).
+            job_layouts=data.get('layouts'),
+            inset_hint=data.get('inset_box'),
             # Trim the source's own subtitles only when ours go back on.
             subtitle_band=(data.get('source_subtitle_band')
                            if v_transcript else None))
@@ -8352,6 +8372,11 @@ async def _reframe_locked(req: ReframeRequest, request: Request, job, overrides)
             crop_overrides=overrides,
             captions_transcript=v_transcript,
             captioner=_recut_captioner(clip),
+            # The job's own layouts — same reason as /api/clip/rerender: the
+            # backend process does not carry the job child's layout env, and
+            # manual re-framing must not silently drop the band-stack.
+            job_layouts=data.get('layouts'),
+            inset_hint=data.get('inset_box'),
             # Trim the source's own subtitles only when ours go back on.
             subtitle_band=(data.get('source_subtitle_band')
                            if v_transcript else None))
