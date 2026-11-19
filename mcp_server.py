@@ -352,6 +352,11 @@ TOOLS = [
 # the user's OpenShorts account (fetches an outside URL, posts publicly).
 _READ = {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False, "idempotentHint": True}
 _ANNOTATIONS = {
+    # (prizm fork merge) snippy deployment's transcript-selection flow
+    "prepare_video": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
+    "get_transcript": _READ,
+    # Agent-render of explicitly chosen ranges: renders locally, reads the video.
+    "render_selected_clips": {"readOnlyHint": False, "destructiveHint": True, "openWorldHint": False},
     "process_video": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True},
     "create_upload": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
     "get_job_status": _READ,
