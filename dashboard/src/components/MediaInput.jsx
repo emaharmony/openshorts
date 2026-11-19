@@ -38,7 +38,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
     const [fileSeconds, setFileSeconds] = useState(null);
     const fileTooShort = fileSeconds != null && fileSeconds < MIN_SOURCE_SECONDS;
     const [acknowledged, setAcknowledged] = useState(false);
-    const [outputFormat, setOutputFormat] = useState('vertical'); // vertical | horizontal | square
+    const outputFormat = 'vertical';
     const [showInfo, setShowInfo] = useState(false);
     // Advanced generation controls — empty string means "let the AI decide",
     // which keeps the default pipeline behavior untouched.
@@ -46,21 +46,6 @@ export default function MediaInput({ onProcess, isProcessing }) {
     const [targetClips, setTargetClips] = useState('');
     const [clipMinSeconds, setClipMinSeconds] = useState('');
     const [clipMaxSeconds, setClipMaxSeconds] = useState('');
-    // Auto-hook: burn the AI hook text into every clip. On by default; the
-    // choice persists so turning it off sticks across sessions.
-    const [autoHook, setAutoHook] = useState(() => {
-        try { return localStorage.getItem('os_auto_hook') !== '0'; } catch { return true; }
-    });
-    const [autoHookStyle, setAutoHookStyle] = useState(() => {
-        // v2 key: the default became 'pill'; an old saved 'classic' was just the old default.
-        try { return localStorage.getItem('os_auto_hook_style_v2') || 'pill'; } catch { return 'pill'; }
-    });
-    // Layout: 'auto' lets the AI pick per video (server default); the others
-    // force one on so a podcast host who knows what they uploaded doesn't
-    // depend on the detector, and 'none' keeps the plain single crop.
-    const [layout, setLayout] = useState(() => {
-        try { return localStorage.getItem('os_layout') || 'auto'; } catch { return 'auto'; }
-    });
     const infoRef = useRef(null);
 
     // Close the compatibility popover on any outside click.
@@ -121,15 +106,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
             targetClips: targetClips || null,
             clipMinSeconds: clipMinSeconds || null,
             clipMaxSeconds: clipMaxSeconds || null,
-            autoHook,
-            autoHookStyle,
-            layout,
         };
-        try {
-            localStorage.setItem('os_auto_hook', autoHook ? '1' : '0');
-            localStorage.setItem('os_auto_hook_style_v2', autoHookStyle);
-            localStorage.setItem('os_layout', layout);
-        } catch { /* ignore */ }
         if (mode === 'url' && url) {
             onProcess({ type: 'url', payload: url, acknowledged: true, outputFormat, ...advanced });
         } else if (mode === 'file' && file && !fileTooShort) {
@@ -254,40 +231,9 @@ export default function MediaInput({ onProcess, isProcessing }) {
                     </div>
                 )}
 
-                {/* Output format selector */}
                 <div className="mt-5" data-tutorial="output-format">
-                    <p className="eyebrow mb-2">Output format</p>
-                    <div className="grid grid-cols-3 gap-2">
-                        {[
-                            { value: 'vertical', label: '9:16', hint: 'Shorts · Reels · TikTok', w: 18, h: 32 },
-                            { value: 'square', label: '1:1', hint: 'Feed posts', w: 28, h: 28 },
-                            { value: 'horizontal', label: '16:9', hint: 'Keep landscape · YouTube', w: 36, h: 20 },
-                        ].map((f) => {
-                            const active = outputFormat === f.value;
-                            return (
-                                <button
-                                    key={f.value}
-                                    type="button"
-                                    onClick={() => setOutputFormat(f.value)}
-                                    className={`py-3 px-2 rounded-input border flex flex-col items-center gap-2 transition-colors
-                                        ${active ? 'border-[color:var(--color-accent)] text-ink' : 'border-rule2 text-muted hover:border-[color:var(--color-accent)]'}`}
-                                >
-                                    {/* Aspect-ratio glyph */}
-                                    <span
-                                        className="rounded-[3px] border-2 transition-colors"
-                                        style={{
-                                            width: `${f.w}px`,
-                                            height: `${f.h}px`,
-                                            borderColor: active ? 'var(--color-accent)' : 'var(--color-rule-2)',
-                                            backgroundColor: active ? 'color-mix(in srgb, var(--color-accent) 22%, transparent)' : 'transparent',
-                                        }}
-                                    />
-                                    <span className="block font-mono text-sm leading-none">{f.label}</span>
-                                    <span className="block text-[11px] sm:text-[10px] leading-tight text-center text-muted">{f.hint}</span>
-                                </button>
-                            );
-                        })}
-                    </div>
+                    <p className="eyebrow mb-1">Output format · fixed</p>
+                    <p className="text-xs text-ink2">9:16 vertical with full-frame gameplay and a separate camera band when detected</p>
                 </div>
 
                 {/* Advanced generation controls — collapsed by default; blank = AI decides */}
@@ -299,7 +245,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
                     >
                         <ChevronDown size={14} className={`transition-transform ${showAdvanced ? 'rotate-180' : ''}`} />
                         advanced options
-                        {(targetClips || clipMinSeconds || clipMaxSeconds || !autoHook) && (
+                        {(targetClips || clipMinSeconds || clipMaxSeconds) && (
                             <span className="text-brass">·</span>
                         )}
                     </button>
@@ -342,50 +288,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
                                 material doesn't hold them. Leave blank to let it decide.
                             </p>
                             <div className="col-span-1 sm:col-span-3 flex flex-wrap items-center justify-between gap-3 pt-3 sm:pt-1 border-t border-rule">
-                                <span className="text-xs text-ink2">vertical layout</span>
-                                <select
-                                    value={layout}
-                                    onChange={(e) => setLayout(e.target.value)}
-                                    className="input-field !w-auto text-xs py-1.5"
-                                    aria-label="vertical layout"
-                                >
-                                    <option value="auto">Auto (AI picks per video)</option>
-                                    <option value="split">Two speakers stacked</option>
-                                    <option value="screencast">Screen over presenter</option>
-                                    <option value="none">Single crop only</option>
-                                </select>
-                            </div>
-                            <div className="col-span-1 sm:col-span-3 flex flex-wrap items-center justify-between gap-3 pt-3 sm:pt-1 border-t border-rule">
-                                <label className="flex items-center gap-2 text-xs text-ink2 cursor-pointer select-none">
-                                    <input
-                                        type="checkbox"
-                                        checked={autoHook}
-                                        onChange={(e) => setAutoHook(e.target.checked)}
-                                        className="w-4 h-4 shrink-0 accent-[var(--color-accent)] cursor-pointer"
-                                    />
-                                    auto hook titles on clips
-                                </label>
-                                {autoHook && (
-                                    <select
-                                        value={autoHookStyle}
-                                        onChange={(e) => setAutoHookStyle(e.target.value)}
-                                        className="input-field !w-auto text-xs py-1.5"
-                                    >
-                                        <option value="pill">Pills</option>
-                                        <option value="classic">Classic</option>
-                                        <option value="dark">Dark</option>
-                                        <option value="yellow">Yellow</option>
-                                        <option value="red">Red</option>
-                                        <option value="outline">Outline</option>
-                                        <option value="outline_yellow">Outline+</option>
-                                    </select>
-                                )}
-                                {autoHook && (
-                                    <p className="w-full text-[11px] leading-relaxed text-muted">
-                                        You can change each clip&apos;s hook text, style, position and size
-                                        afterwards with its hook button.
-                                    </p>
-                                )}
+                                <span className="text-xs text-ink2">Hooks off · Karaoke captions 28px · bottom, tight margin</span>
                             </div>
                         </div>
                     )}

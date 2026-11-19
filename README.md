@@ -458,7 +458,7 @@ lives in [`examples/n8n/`](examples/n8n/).
 
 - **Non-Root Execution**: Containers run as dedicated `appuser`
 - **Concurrency Control**: Semaphore-based job queue (`MAX_CONCURRENT_JOBS`)
-- **Auto-Cleanup**: Automatic purging of old jobs (1h retention)
+- **Auto-Cleanup**: Jobs and uploads are automatically purged after 7 days (`604800` seconds). Disk-cap cleanup is disabled so storage pressure does not shorten that window.
 - **Encrypted Keys**: API keys encrypted client-side, never stored server-side
 - **Upload Validation**: Image uploads validated for format and minimum size
 - **File Limits**: 2GB upload limit protection

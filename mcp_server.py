@@ -29,26 +29,36 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 
 import mcp_ui
-from subtitles import CAPTION_PRESETS, line_budget
 
 router = APIRouter()
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 SERVER_INFO = {"name": "openshorts", "title": "OpenShorts", "version": "1.0.0"}
 INSTRUCTIONS = (
-    "OpenShorts turns long videos (YouTube URLs or direct video files) into "
-    "viral-ready vertical clips. When the user gives you a video URL, hand it "
-    "to process_video exactly as written: OpenShorts downloads, transcribes "
-    "and analyses the video on its own servers. Do NOT try to open, fetch, "
-    "search for, summarise or transcribe the URL yourself first; you cannot "
-    "reach the video and it is not needed. Typical flow: process_video -> "
-    "poll get_job_status until 'completed' (a job takes minutes; poll every "
-    "30-60s or pass webhook_url) -> list_clips -> optionally add_subtitles / "
-    "recut_clip / publish_clip. Check get_quota before large jobs. When a "
-    "tool reports quota_exceeded or no_plan, tell the user and give them the "
-    "upgrade_url it returns: it opens the plan's checkout. The user "
-    "must own the content or hold the rights: ask once, then pass "
-    "confirm_rights=true."
+    "OpenShorts turns long videos into viral-ready clips. Use YouTube URLs, "
+    "public Twitch VOD URLs, or "
+    "completed uploads for Codex-led selection. "
+    "Choose the flow based on the user's request: "
+    "when the user wants OpenShorts to find moments automatically, call "
+    "process_video; when the user asks Codex/the agent to choose moments, "
+    "use prepare_video -> get_transcript -> render_selected_clips so the agent "
+    "can select explicit source-time ranges. For agent selection, poll "
+    "get_transcript while processing and fetch every page using offset/limit. "
+    "Use YouTube URLs, public Twitch VOD URLs, or completed OpenShorts uploads; "
+    "for Twitch, only public VOD pages are supported and restricted or "
+    "subscriber-only VODs may fail without access; never request or use Twitch "
+    "cookies or tokens. Stop and explain if a "
+    "link is unsupported. Do not try to open, fetch, search for, summarize, or "
+    "transcribe the source URL yourself; OpenShorts handles source access and "
+    "transcription. Ask the user to confirm ownership or processing rights "
+    "before either flow starts; a URL alone is not consent. Pass "
+    "confirm_rights=true after confirmation. For automatic selection, poll "
+    "get_job_status until 'completed' (usually minutes; poll every 30-60s) "
+    "then call list_clips. For agent selection, render_selected_clips returns "
+    "a job_id; poll get_job_status until completed and return the clip "
+    "references it provides. Do not publish unless separately requested. "
+    "Check get_quota before large jobs. When a tool reports quota_exceeded or "
+    "no_plan, tell the user and give them the upgrade_url it returns."
 )
 
 # Headers an MCP caller may use to authenticate / bring their own keys; they are
@@ -60,13 +70,63 @@ _LOG_TAIL = 10  # status logs are for humans; agents only need the tail
 
 TOOLS = [
     {
+        "name": "prepare_video",
+        "title": "Prepare a video transcript for agent clip selection",
+        "description": (
+            "Use this when the agent should choose moments from the transcript. "
+            "Accepts a YouTube URL, a public Twitch VOD URL, or a completed "
+            "OpenShorts upload; transcribes "
+            "without running OpenShorts' automatic clip selector. Ask the user "
+            "to confirm ownership or processing rights before calling; a link "
+            "alone is not consent. Twitch subscriber-only or otherwise restricted "
+            "VODs may fail; do not use Twitch credentials, cookies, or tokens. Returns a "
+            "session_id for get_transcript and render_selected_clips."
+        ),
+        "inputSchema": {"type": "object", "properties": {
+            "source_url": {"type": "string", "description": "A YouTube video URL or public Twitch VOD URL (twitch.tv/videos/<id> or twitch.tv/<channel>/video/<id>); pass exactly as provided."},
+            "upload_id": {"type": "string", "description": "Completed upload id from create_upload for a user-provided video file."},
+            "confirm_rights": {"type": "boolean"}},
+            "required": ["confirm_rights"]},
+    },
+    {
+        "name": "get_transcript",
+        "title": "Get a prepared video's timestamped transcript",
+        "description": "Return a bounded page of timestamped transcript segments. Poll while status is processing; use offset/limit to fetch later pages.",
+        "inputSchema": {"type": "object", "properties": {
+            "session_id": {"type": "string"},
+            "offset": {"type": "integer", "minimum": 0},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 250}}, "required": ["session_id"]},
+    },
+    {
+        "name": "render_selected_clips",
+        "title": "Render clips chosen by the agent",
+        "description": (
+            "Render explicit source-video time ranges from a prepared session. "
+            "Ranges must be 5-180 seconds, up to 15 clips; automatic selection "
+            "is skipped. The server applies its fixed vertical band layout, no "
+            "hooks, and no generated captions. The user must own or have "
+            "rights to process the video."
+        ),
+        "inputSchema": {"type": "object", "properties": {
+            "session_id": {"type": "string"},
+            "clips": {"type": "array", "minItems": 1, "maxItems": 15,
+                "items": {"type": "object", "properties": {
+                    "start": {"type": "number"}, "end": {"type": "number"},
+                    "title": {"type": "string", "maxLength": 200},
+                    "description": {"type": "string", "maxLength": 2000},
+                    "viral_hook_text": {"type": "string", "maxLength": 300}}, "required": ["start", "end"]}},
+            "confirm_rights": {"type": "boolean"}},
+            "required": ["session_id", "clips", "confirm_rights"]},
+    },
+    {
         "name": "process_video",
         "title": "Process a video into short clips",
         "description": (
             "Start clipping a video from its URL. OpenShorts downloads the "
             "source itself, transcribes it, finds the most viral moments with AI "
-            "and renders vertical (9:16) clips. Captions and the AI hook line are "
-            "burned by default; pass captions=false or auto_hook=false to skip either. "
+            "and renders vertical (9:16) clips. The server always uses its fixed "
+            "band layout, no hooks, and no generated captions. These render "
+            "settings cannot be changed per job. "
             "Call this directly "
             "with the URL the user gave you; do not fetch, search or inspect the "
             "URL yourself first (you cannot access the video, and it is not "
@@ -81,9 +141,9 @@ TOOLS = [
                 "source_url": {
                     "type": "string",
                     "description": "Public video URL, passed through exactly as the user gave it "
-                                   "(YouTube watch/short/live URL, a direct video file URL, or a "
-                                   "tmpfiles.org link from the create_upload fallback). The server "
-                                   "does the downloading. Omit when using upload_id.",
+                                   "(YouTube watch/short/live URL or a direct video file URL). The "
+                                   "server does the downloading. For local files, use upload_id "
+                                   "from create_upload instead. Omit when using upload_id.",
                 },
                 "upload_id": {
                     "type": "string",
@@ -91,38 +151,9 @@ TOOLS = [
                                    "file was PUT to its upload_url. Use when the user gave you a "
                                    "video file rather than a link.",
                 },
-                "auto_hook": {
-                    "type": "boolean",
-                    "description": "Burn the AI-written hook line (the clip's title) over the first "
-                                   "seconds of each clip, as the dashboard does. Default true; set "
-                                   "false for clean clips.",
-                },
-                "hook_style": {
-                    "type": "string",
-                    "enum": ["pill", "classic", "dark", "yellow", "red", "outline", "outline_yellow"],
-                    "description": "Look of the hook text (with auto_hook). Default pill.",
-                },
-                "captions": {
-                    "type": "boolean",
-                    "description": "Default true: burn word-level captions on every clip. Set false "
-                                   "when the source already has subtitles burned in (they would "
-                                   "stack) or the user wants clean clips; add_subtitles can still "
-                                   "caption a clip later.",
-                },
                 "confirm_rights": {
                     "type": "boolean",
                     "description": "Must be true: the user owns the content or has rights to process it.",
-                },
-                "layouts": {
-                    "type": "array",
-                    "items": {"type": "string",
-                              "enum": ["auto", "split", "screencast", "speaker_cut", "punch_in"]},
-                    "description": "Optional extra reframe layouts. 'auto' lets AI pick per video.",
-                },
-                "output_format": {
-                    "type": "string",
-                    "enum": ["auto", "vertical", "horizontal", "square"],
-                    "description": "Clip aspect. Default auto (vertical).",
                 },
                 "webhook_url": {
                     "type": "string",
@@ -161,14 +192,13 @@ TOOLS = [
             "Use when the user hands you a video FILE instead of a link. Returns "
             "an upload_url: send the file's raw bytes to it with an HTTP PUT "
             "(for example `curl -T video.mp4 <upload_url>`), then call "
-            "process_video with the returned upload_id. Unused slots are "
-            "deleted after expires_in seconds (6 h); max size is max_mb. "
-            "FALLBACK if your sandbox cannot reach upload_url: upload the file "
-            "to tmpfiles.org (`curl -F file=@video.mp4 https://tmpfiles.org/api/v1/upload`), "
-            "and pass the returned url to process_video as source_url right "
-            "away (their files expire after 60 minutes; the server refreshes "
-            "the signed download link itself). Otherwise ask the user to run "
-            "the curl command or to share a public link."
+            "prepare_video with the returned upload_id when Codex should choose "
+            "moments from the transcript. Use process_video with that upload_id "
+            "only when the user explicitly wants OpenShorts' automatic selector. "
+            "Unused slots are deleted after expires_in seconds (6 h); max size "
+            "is max_mb. If your environment cannot reach upload_url, ask the user "
+            "to upload the file through an accessible OpenShorts upload flow; do "
+            "not route a Codex-selected file through an unrelated temporary URL."
         ),
         "inputSchema": {
             "type": "object",
@@ -222,41 +252,13 @@ TOOLS = [
     },
     {
         "name": "add_subtitles",
-        "title": "Burn styled captions onto a clip",
-        "description": (
-            "Re-style the captions of one clip (clips already ship with the "
-            "'default' preset). Easiest: pass a preset; any other field you send "
-            "overrides that part of it. Without a preset, style 'karaoke' "
-            "highlights the active word."
-        ),
+        "title": "Apply captions to a clip (disabled)",
+        "description": "Generated captions are disabled by the server-wide output policy.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "job_id": {"type": "string"},
                 "clip_index": {"type": "integer", "description": "0-based index from list_clips."},
-                "preset": {"type": "string", "enum": list(CAPTION_PRESETS),
-                           "description": (
-                               "default: Anton caps, yellow active word. "
-                               "hormozi: words appear as spoken, yellow active word. "
-                               "pill: purple box behind the active word. "
-                               "lime: lime box behind the active word. "
-                               "oneword: one big word at a time. "
-                               "clean: no outline, soft shadow, sentence case.")},
-                "style": {"type": "string", "enum": ["classic", "karaoke"]},
-                "position": {"type": "string", "enum": ["top", "middle", "bottom"]},
-                "font_size": {"type": "integer",
-                              "description": "44 is the default (M); 34 = S, 56 = L, 70 = XL."},
-                "font_name": {"type": "string",
-                              "description": "Anton, Montserrat ExtraBold, Verdana, Arial, Impact, Georgia..."},
-                "font_color": {"type": "string", "description": "Hex color, e.g. #FFFFFF."},
-                "highlight_color": {"type": "string", "description": "Karaoke active-word color (or box color with effect 'highlight')."},
-                "effect": {"type": "string", "enum": ["none", "pop", "glow", "box", "highlight"],
-                           "description": "Karaoke active-word effect; 'highlight' = solid box behind it."},
-                "reveal": {"type": "boolean", "description": "Karaoke: words appear as they are spoken."},
-                "one_word": {"type": "boolean", "description": "Show one word at a time."},
-                "shadow": {"type": "integer", "description": "Drop shadow depth 0-6."},
-                "border_width": {"type": "integer", "description": "Outline 0-10 (0 needs a shadow to stay readable)."},
-                "uppercase": {"type": "boolean"},
             },
             "required": ["job_id", "clip_index"],
         },
@@ -294,18 +296,6 @@ TOOLS = [
                 "snap_to_words": {
                     "type": "boolean",
                     "description": "Snap each boundary onto transcript word boundaries (recommended).",
-                },
-                "reapply_captions": {
-                    "type": "boolean",
-                    "description": "Burn default captions back on after the recut (default true).",
-                },
-                "framing": {
-                    "type": "string", "enum": ["auto", "full", "track"],
-                    "description": "Layout override: 'full' shows the whole source frame "
-                                   "(no side-cropping), 'track' forces the subject-tracking "
-                                   "crop, 'auto' resets to the AI classifier. Omit to keep "
-                                   "the clip's current framing. Non-auto values re-run the "
-                                   "reframe engine and need the retained source video.",
                 },
             },
             "required": ["job_id", "clip_index", "segments"],
@@ -371,22 +361,16 @@ async def _tool_process_video(client, args):
         "url": args.get("source_url"),
         "upload_id": args.get("upload_id"),
         "acknowledged": True,
-        "layouts": args.get("layouts") or [],
-        "output_format": args.get("output_format"),
+        "output_format": "vertical",
+        "captions": False,
+        "auto_hook": False,
         "force_low_quality": bool(args.get("force_low_quality")),
         "webhook_url": args.get("webhook_url"),
         "webhook_secret": args.get("webhook_secret"),
     }
-    for k in ("target_clips", "clip_min_seconds", "clip_max_seconds", "captions"):
+    for k in ("target_clips", "clip_min_seconds", "clip_max_seconds"):
         if args.get(k) is not None:
             body[k] = args[k]
-    # Same default as the dashboard: hook on unless the caller opts out. The
-    # REST endpoint keeps "absent = off" for older integrations; the MCP
-    # tool is newer than the hook and its users expect the dashboard output.
-    if args.get("auto_hook", True):
-        body["auto_hook"] = True
-        if args.get("hook_style"):
-            body["auto_hook_style"] = args["hook_style"]
     resp = await client.post("/api/process", json=body)
     if resp.status_code >= 400:
         return _api_error(resp), True
@@ -398,6 +382,49 @@ async def _tool_process_video(client, args):
     data["hint"] = ("Processing takes minutes. Poll get_job_status every 30-60s"
                     + ("" if body["webhook_url"] else " (or re-run with webhook_url for a callback)") + ".")
     return data, False
+
+
+async def _tool_prepare_video(client, args):
+    if not args.get("confirm_rights"):
+        return {"error": "confirm_rights must be true: the user must own the content or hold processing rights."}, True
+    data = {}
+    if args.get("source_url"):
+        data["url"] = args["source_url"]
+    elif args.get("upload_id"):
+        data["upload_id"] = args["upload_id"]
+    else:
+        return {"error": "Provide source_url or a completed upload_id."}, True
+    resp = await client.post("/api/thumbnail/upload", data=data)
+    if resp.status_code >= 400:
+        return _api_error(resp), True
+    out = resp.json()
+    out["hint"] = "Transcription runs in the background. Poll get_transcript with this session_id; it returns immediately with status=processing until ready."
+    return out, False
+
+
+async def _tool_get_transcript(client, args):
+    resp = await client.get(f"/api/thumbnail/transcript/{args['session_id']}", params={
+        "offset": args.get("offset", 0), "limit": args.get("limit", 100)})
+    if resp.status_code >= 400:
+        return _api_error(resp), True
+    return resp.json(), False
+
+
+async def _tool_render_selected_clips(client, args):
+    if not args.get("confirm_rights"):
+        return {"error": "confirm_rights must be true: the user must own the content or hold processing rights."}, True
+    body = {"acknowledged": True,
+            "thumbnail_session_id": args["session_id"],
+            "selected_clips": args["clips"],
+            "output_format": "vertical",
+            "captions": False,
+            "auto_hook": False}
+    resp = await client.post("/api/process", json=body)
+    if resp.status_code >= 400:
+        return _api_error(resp), True
+    out = resp.json()
+    out["hint"] = "Codex-selected ranges are being rendered; automatic clip selection was skipped. Poll get_job_status for results."
+    return out, False
 
 
 async def _tool_create_upload(client, args):
@@ -472,21 +499,6 @@ async def _tool_get_quota(client, args):
 
 async def _tool_add_subtitles(client, args):
     body = {"job_id": args["job_id"], "clip_index": args["clip_index"]}
-    for k in ("preset", "style", "position", "font_size", "font_name", "font_color",
-              "highlight_color", "effect", "reveal", "shadow", "border_width",
-              "uppercase"):
-        if args.get(k) is not None:
-            body[k] = args[k]
-    if args.get("one_word"):
-        body["max_chars"] = 1
-    elif ("font_size" in body or "font_name" in body) and \
-            CAPTION_PRESETS.get(str(body.get("preset") or "").lower(), {}).get("max_chars") != 1:
-        # A resized or refonted line gets the budget that keeps it on one
-        # line, as the dashboard does; the preset's font fills the gap.
-        base = CAPTION_PRESETS.get(str(body.get("preset") or "default").lower(),
-                                   CAPTION_PRESETS["default"])
-        body["max_chars"] = line_budget(body.get("font_name", base["font_name"]),
-                                        body.get("font_size", base["font_size"]))
     resp = await client.post("/api/subtitle", json=body)
     if resp.status_code >= 400:
         return _api_error(resp), True
@@ -495,8 +507,8 @@ async def _tool_add_subtitles(client, args):
 
 async def _tool_recut_clip(client, args):
     body = {"job_id": args["job_id"], "clip_index": args["clip_index"],
-            "segments": args["segments"]}
-    for k in ("snap_to_words", "reapply_captions", "framing"):
+            "segments": args["segments"], "reapply_captions": False}
+    for k in ("snap_to_words",):
         if args.get(k) is not None:
             body[k] = args[k]
     resp = await client.post("/api/clip/rerender", json=body)
@@ -518,6 +530,9 @@ async def _tool_publish_clip(client, args):
 
 
 _TOOL_IMPLS = {
+    "prepare_video": _tool_prepare_video,
+    "get_transcript": _tool_get_transcript,
+    "render_selected_clips": _tool_render_selected_clips,
     "process_video": _tool_process_video,
     "create_upload": _tool_create_upload,
     "get_job_status": _tool_get_job_status,

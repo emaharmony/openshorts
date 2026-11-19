@@ -130,8 +130,11 @@ BILLING_ENABLED = os.environ.get("BILLING_ENABLED", "").lower() in ("1", "true",
 # OUTPUT_MAX_GB / UPLOADS_MAX_GB caps below already bound the disk. Cloud keeps
 # the tight default because clips are archived to R2 as soon as a job finishes.
 JOB_RETENTION_SECONDS = int(
-    os.environ.get("JOB_RETENTION_SECONDS", "3600" if BILLING_ENABLED else "86400")
+    os.environ.get("JOB_RETENTION_SECONDS", "3600" if BILLING_ENABLED else "604800")
 )
+# Self-hosted deployments keep completed jobs for a week by default. Set this
+# false to disable retention sweeps; disk caps are configured separately.
+AUTO_CLEANUP_ENABLED = os.environ.get("AUTO_CLEANUP_ENABLED", "true").lower() in ("1", "true", "yes")
 # The retained download of a URL job (--keep-original) is the one artifact that
 # is a full copy of someone else's video rather than something we made, so it
 # can be aged out ahead of the clips it produced. Defaults to the job clock,
@@ -937,7 +940,7 @@ CAPTION_STYLE_FIELDS = (
     "style", "position", "font_size", "font_name", "font_color",
     "border_color", "border_width", "bg_color", "bg_opacity",
     "highlight_color", "effect", "base_opacity", "uppercase", "reveal",
-    "shadow", "max_chars", "max_duration")
+    "shadow", "max_chars", "max_duration", "margin_v")
 
 
 def _words_transcript(words, language="en"):
@@ -976,6 +979,8 @@ def _burn_caption_style(video_path, out_path, sub_path, transcript, start, end,
             bg_opacity=s["bg_opacity"], effect=s["effect"],
             base_opacity=s["base_opacity"], uppercase=s["uppercase"],
             reveal=s["reveal"], shadow=s["shadow"])
+        if s.get("margin_v") is not None:
+            opts["margin_v"] = s["margin_v"]
         if max_chars is not None:
             opts["max_chars"] = max_chars
         if max_duration is not None:
@@ -1705,6 +1710,9 @@ def _sweep_retained_sources(now=None):
 async def cleanup_jobs():
     """Background task to remove old jobs and files."""
     import time
+    if not AUTO_CLEANUP_ENABLED:
+        print("🧹 Automatic cleanup is disabled.")
+        return
     print("🧹 Cleanup task started.")
     while True:
         try:
@@ -2778,7 +2786,7 @@ async def get_config():
         "youtubeUrlEnabled": not DISABLE_YOUTUBE_URL,
         "billingEnabled": BILLING_ENABLED,
         "googleAuthEnabled": bool(BILLING_ENABLED and cloud.settings.google_auth_enabled),
-        "jobRetentionSeconds": JOB_RETENTION_SECONDS,
+        "jobRetentionSeconds": JOB_RETENTION_SECONDS if AUTO_CLEANUP_ENABLED else 0,
         # Self-host only: tells the dashboard the Gemini key is optional
         # because the moment picker runs on an OpenAI-compatible server.
         "localLlm": None if BILLING_ENABLED else llm_backend.describe(),
@@ -3072,13 +3080,8 @@ async def process_endpoint(
     upload_id: Optional[str] = Form(None),
     max_minutes: Optional[str] = Form(None),
 ):
+    selected_clips = None
     api_key = await resolve_gemini(request)
-    if not api_key and not (llm_backend.active() and not BILLING_ENABLED):
-        # Self-host with an OpenAI-compatible server configured needs no
-        # Google key for the core pipeline: the moment picker runs there and
-        # the frame-based stages degrade on their own (layout_picker returns
-        # "none", silent videos fail with a message that says why).
-        raise gemini_missing_error()
 
     ack_flag = str(acknowledged).lower() in ("1", "true", "yes")
     # May be lowered by the paid-proxy budget check in the metering block
@@ -3106,6 +3109,13 @@ async def process_endpoint(
         captions = body.get("captions")
         upload_id = body.get("upload_id")
         max_minutes = body.get("max_minutes")
+        selected_clips = body.get("selected_clips")
+
+    if (selected_clips is None and not api_key
+            and not (llm_backend.active() and not BILLING_ENABLED)):
+        # Explicit clip ranges do not need a selection model or a Gemini key.
+        # Automatic jobs retain the existing model requirement.
+        raise gemini_missing_error()
 
     # Normalize output format (auto = keep pipeline default).
     if output_format not in ("vertical", "horizontal", "square"):
@@ -3137,6 +3147,40 @@ async def process_endpoint(
 
     if not url and not file and not thumb_session and not upload_slot:
         raise HTTPException(status_code=400, detail="Must provide URL, File or upload_id")
+
+    # Explicitly selected ranges are an agent-render request, not a prompt for
+    # the normal automatic clip detector. Keep the validated ranges in a job
+    # file and pass that file to main.py so they survive worker/resume handoff.
+    if selected_clips is not None:
+        if not thumb_session:
+            raise HTTPException(status_code=400,
+                                detail="selected_clips requires a prepared thumbnail_session_id")
+        if not isinstance(selected_clips, list) or not 1 <= len(selected_clips) <= 15:
+            raise HTTPException(status_code=400,
+                                detail="selected_clips must contain 1 to 15 clip ranges")
+        source_duration = _media_duration_seconds(thumb_session["video_path"])
+        for index, clip in enumerate(selected_clips):
+            if not isinstance(clip, dict):
+                raise HTTPException(status_code=400, detail=f"selected_clips[{index}] must be an object")
+            start, end = clip.get("start"), clip.get("end")
+            if (isinstance(start, bool) or isinstance(end, bool)
+                    or not isinstance(start, (int, float))
+                    or not isinstance(end, (int, float))):
+                raise HTTPException(status_code=400,
+                                    detail=f"selected_clips[{index}] start and end must be numbers")
+            try:
+                finite_range = math.isfinite(float(start)) and math.isfinite(float(end))
+            except (OverflowError, ValueError):
+                finite_range = False
+            if not finite_range:
+                raise HTTPException(status_code=400,
+                                    detail=f"selected_clips[{index}] start and end must be finite numbers")
+            if start < 0 or end <= start or end - start < 5 or end - start > 180:
+                raise HTTPException(status_code=400,
+                                    detail=f"selected_clips[{index}] must be a 5-180 second range")
+            if source_duration > 0 and end > source_duration:
+                raise HTTPException(status_code=400,
+                                    detail=f"selected_clips[{index}] exceeds source duration")
 
     # Completion callback: reject unsafe targets NOW (clear 400) — delivery
     # re-validates anyway, but failing at submit is the debuggable behavior.
@@ -3185,6 +3229,11 @@ async def process_endpoint(
     # running this server. Every job then dies on `import cv2`. The quality
     # probe above already gets this right.
     cmd = [sys.executable, "-u", "main.py"] # -u for unbuffered
+    if selected_clips is not None:
+        selected_clips_path = os.path.join(job_output_dir, "selected_clips.json")
+        with open(selected_clips_path, "w", encoding="utf-8") as f:
+            json.dump(selected_clips, f)
+        cmd.extend(["--selected-clips", selected_clips_path])
     env = child_env()
     if not paid_allowed:
         # Daily paid-proxy budget hit: this job runs on the free routes only.
@@ -3255,9 +3304,12 @@ async def process_endpoint(
     # captions=false: the source already carries burned-in subtitles (or the
     # caller adds its own later), so skip the free auto-caption pass instead
     # of stacking a second layer. Absent → the deployment default (on).
-    if captions is not None and str(captions).lower() in ("0", "false", "no"):
+    if (selected_clips is not None
+            or (captions is not None and str(captions).lower() in ("0", "false", "no"))):
         env["AUTO_CAPTIONS"] = "0"
         print(f"[captions] job={job_id} auto-captions off")
+    if selected_clips is not None:
+        env["AUTO_HOOK"] = "0"
 
     input_path = None
     if url:
@@ -3337,6 +3389,18 @@ async def process_endpoint(
     user_id, priority, reservation_id, user_plan, partial = await reserve_process_minutes(
         request, url, input_path, job_id, max_minutes=max_minutes)
 
+    if selected_clips is not None and partial:
+        cap_seconds = float(partial["processed_minutes"]) * 60
+        if any(clip["end"] > cap_seconds for clip in selected_clips):
+            if input_path and os.path.exists(input_path):
+                os.remove(input_path)
+            await _drop_unstarted_job(reservation_id, job_output_dir)
+            raise HTTPException(
+                status_code=402,
+                detail=(f"A selected clip ends beyond the {partial['processed_minutes']}-minute "
+                        "processing limit. Increase available processing minutes and retry."),
+            )
+
     # Pre-flight quality gate: probe the offered resolution BEFORE starting, so
     # the user can abort (refresh cookies / update yt-dlp) instead of burning
     # 20 min on a 360p-only source. Fail-open: any probe error starts normally.
@@ -3374,6 +3438,10 @@ async def process_endpoint(
         # main.py cuts the source down to this many minutes before anything
         # reads it, so the whole pipeline (and the editor) sees a short video.
         env["MAX_SOURCE_MINUTES"] = str(partial["processed_minutes"])
+    elif selected_clips is not None:
+        # A stale deployment-level cap must not truncate a prepared source
+        # behind the selected ranges' back.
+        env.pop("MAX_SOURCE_MINUTES", None)
     if user_plan == "free":
         # Free-plan clips carry a burned-in watermark (applied by the main.py
         # subprocess after each clip renders).
@@ -4064,6 +4132,14 @@ class SubtitleRequest(BaseModel):
     # keeps the generator's defaults, which is what old clients send.
     max_chars: Optional[int] = None
     max_duration: Optional[float] = None
+    # PlayResY-288 margin from the bottom edge for the caption block. None
+    # keeps the deployment default (SAFE_MARGIN_V = 28 -> ~187px real on the
+    # 1920 frame). Safe-zone research (Meta Reels guide: keep the bottom 35%
+    # clear; filmscribe 2026 TikTok measurement: handle+description+sound
+    # cover the bottom ~484px; daohuy practitioner: button stack ~180px,
+    # description ~350px) puts the OPTIMAL burn margin at ~350px real ->
+    # PlayRes ~52. Anything lower collides with TikTok's description text.
+    margin_v: Optional[int] = None
     # Named look (subtitles.CAPTION_PRESETS); any field sent explicitly
     # alongside it overrides that field of the preset.
     preset: Optional[str] = None
@@ -4260,10 +4336,14 @@ class RerenderRequest(BaseModel):
     framing: Optional[str] = None
 
 
-# Manual framing -> reframe-engine strategy. 'full' shows the whole source
-# frame (WIDE: no side-cropping, blurred filler bands); 'track' forces the
-# subject-tracking crop. Anything non-auto needs the retained source video.
-_FRAMING_STRATEGIES = {"auto": None, "full": "WIDE", "track": "TRACK"}
+# Manual framing -> reframe-engine strategy. 'track' forces the subject-tracking
+# crop. 'full' is the composite band-stack look (screen whole + enlarged cam,
+# the template look): the reframe engine maps it to per-scene INSET where the
+# webcam is really present and WIDE elsewhere — a plain 'WIDE' stamp would
+# render the raw band and put a composite source's baked-in cam/chat column
+# back into the game band (job 85ca7d9d rerenders, 19-oct-2026).
+# Anything non-auto needs the retained source video.
+_FRAMING_STRATEGIES = {"auto": None, "full": "full", "track": "TRACK"}
 
 
 # One lock per job (same pattern as _restore_locks): rerenders on the same job
@@ -4393,6 +4473,12 @@ async def _rerender_locked(req: RerenderRequest, request: Request, job):
             force_strategy=force_strategy,
             captions_transcript=v_transcript,
             captioner=_recut_captioner(clip),
+            # The job's own layouts, so a reframe inside the backend process
+            # keeps the layout gates the spawned job child had (see the note
+            # in recut.perform_recut's render closure and recut.py's module
+            # layout_env_runtime.py).
+            job_layouts=data.get('layouts'),
+            inset_hint=data.get('inset_box'),
             # Trim the source's own subtitles only when ours go back on.
             subtitle_band=(data.get('source_subtitle_band')
                            if v_transcript else None))
@@ -4762,6 +4848,11 @@ async def _reframe_locked(req: ReframeRequest, request: Request, job, overrides)
             crop_overrides=overrides,
             captions_transcript=v_transcript,
             captioner=_recut_captioner(clip),
+            # The job's own layouts — same reason as /api/clip/rerender: the
+            # backend process does not carry the job child's layout env, and
+            # manual re-framing must not silently drop the band-stack.
+            job_layouts=data.get('layouts'),
+            inset_hint=data.get('inset_box'),
             # Trim the source's own subtitles only when ours go back on.
             subtitle_band=(data.get('source_subtitle_band')
                            if v_transcript else None))
@@ -6370,6 +6461,36 @@ async def thumbnail_frames(session_id: str, request: Request):
                 frames = []
             session["frames"] = frames
     return {"frames": session["frames"]}
+
+
+@app.get("/api/thumbnail/transcript/{session_id}")
+async def thumbnail_transcript(session_id: str, request: Request, offset: int = 0, limit: int = 100):
+    """Poll a thumbnail session's transcript and return bounded segment pages."""
+    session = thumbnail_sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    await _assert_job_owner(request, session)
+
+    offset = max(0, offset)
+    limit = min(250, max(1, limit))
+    if session.get("transcript_error"):
+        return {"session_id": session_id, "status": "failed", "error": session["transcript_error"]}
+    if not session.get("transcript_ready"):
+        return {"session_id": session_id, "status": "processing"}
+
+    segments = session.get("transcript_segments") or []
+    page = segments[offset:offset + limit]
+    next_offset = offset + len(page)
+    if next_offset >= len(segments):
+        next_offset = None
+    return {
+        "session_id": session_id,
+        "status": "ready",
+        "segments": page,
+        "next_offset": next_offset,
+        "duration_seconds": session.get("video_duration", 0),
+        "language": session.get("language", "en"),
+    }
 
 
 class ThumbnailDescribeRequest(BaseModel):

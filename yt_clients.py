@@ -96,6 +96,38 @@ def youtube_non_video_reason(url):
             "the link of the video itself")
 
 
+def twitch_vod_reason(url):
+    """Why a Twitch URL is not one public VOD, or None for a supported URL."""
+    import re
+    from urllib.parse import urlparse
+
+    try:
+        parts = urlparse(url or "")
+    except ValueError:
+        return None
+    host = (parts.hostname or "").lower()
+    if host != "twitch.tv" and not host.endswith(".twitch.tv"):
+        return None
+    if host not in ("twitch.tv", "www.twitch.tv"):
+        return "an unsupported Twitch host; use twitch.tv or www.twitch.tv"
+    try:
+        has_custom_port = parts.port is not None
+    except ValueError:
+        return "a malformed Twitch URL"
+    if parts.username or parts.password or has_custom_port:
+        return "a Twitch URL with credentials or a custom port"
+    segments = [segment for segment in parts.path.split("/") if segment]
+    if len(segments) == 2 and segments[0].lower() == "videos" \
+            and re.fullmatch(r"[0-9]+", segments[1]):
+        return None
+    if (len(segments) == 3 and re.fullmatch(r"[A-Za-z0-9_]{1,25}", segments[0])
+            and segments[1].lower() == "video"
+            and re.fullmatch(r"[0-9]+", segments[2])):
+        return None
+    return ("not a single Twitch VOD page; use twitch.tv/videos/<id> or "
+            "twitch.tv/<channel>/video/<id>")
+
+
 def pot_provider_args(bgutil_http, bgutil_script):
     """Extractor args selecting the PO token provider (bgutil http or script)."""
     if bgutil_http:

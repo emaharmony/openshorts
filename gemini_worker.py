@@ -334,6 +334,9 @@ HOOK PLAYBOOK — pick the strongest fitting pattern for `viral_hook_text` (max 
   named, quote the clip's strongest sentence instead of summarising the topic.
 
 COPY RULES — ALL text fields (descriptions, title, hook) MUST be written in TRANSCRIPT_LANGUAGE ({language}):
+- SPEAKER NOTE: {speaker_note}
+  Refer to the person on camera with these pronouns unless the transcript
+  itself clearly says otherwise. Do not guess a different gender.
 - Descriptions (TikTok + Instagram): 1-2 punchy sentences that tease the payoff
   without spoiling it, then 3-5 topically relevant hashtags. No generic hashtag spam.
 - `video_title_for_youtube_short`: max 100 chars, curiosity-driven, no fake claims.

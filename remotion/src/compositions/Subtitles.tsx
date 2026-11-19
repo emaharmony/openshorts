@@ -7,7 +7,12 @@ import {
   spring,
   interpolate,
 } from "remotion";
-import type { SubtitleConfig } from "../lib/types";
+import {
+  FIXED_CAPTION_MAX_CHARS,
+  FIXED_CAPTION_MAX_DURATION_MS,
+  FIXED_SUBTITLE_STYLE,
+  type SubtitleConfig,
+} from "../lib/types";
 import { groupCaptionsIntoBlocks, getActiveWordIndex } from "../lib/captions";
 import { getFontStack } from "../lib/fonts";
 
@@ -23,12 +28,21 @@ const RTL_CHARS = /[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]/;
 const POSITION_MAP: Record<string, React.CSSProperties> = {
   top: { top: "12%", bottom: "auto" },
   middle: { top: "45%", bottom: "auto" },
-  bottom: { bottom: "10%", top: "auto" },
+  bottom: { bottom: "3.5%", top: "auto" },
 };
 
 export const Subtitles: React.FC<SubtitlesProps> = ({ config }) => {
   const { fps } = useVideoConfig();
-  const blocks = groupCaptionsIntoBlocks(config.captions);
+  const fixedConfig: SubtitleConfig = {
+    captions: config.captions,
+    position: "bottom",
+    style: FIXED_SUBTITLE_STYLE,
+  };
+  const blocks = groupCaptionsIntoBlocks(
+    fixedConfig.captions,
+    FIXED_CAPTION_MAX_CHARS,
+    FIXED_CAPTION_MAX_DURATION_MS
+  );
 
   return (
     <AbsoluteFill>
@@ -48,7 +62,7 @@ export const Subtitles: React.FC<SubtitlesProps> = ({ config }) => {
           >
             <SubtitleBlock
               block={block}
-              config={config}
+              config={fixedConfig}
               blockStartMs={block.startMs}
             />
           </Sequence>
@@ -180,12 +194,8 @@ const WordSpan: React.FC<WordSpanProps> = ({
         break;
       }
       case "karaoke": {
-        extraStyle = {
-          backgroundColor: style.highlightColor,
-          color: style.bgColor || "#000000",
-          borderRadius: 4,
-          padding: "2px 6px",
-        };
+        // Karaoke means the active word changes color. Do not add the solid
+        // per-word box here; OpenShorts' fixed output style has no backdrop.
         break;
       }
       case "word-highlight": {
