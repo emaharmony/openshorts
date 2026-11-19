@@ -143,8 +143,11 @@ BILLING_ENABLED = os.environ.get("BILLING_ENABLED", "").lower() in ("1", "true",
 # OUTPUT_MAX_GB / UPLOADS_MAX_GB caps below already bound the disk. Cloud keeps
 # the tight default because clips are archived to R2 as soon as a job finishes.
 JOB_RETENTION_SECONDS = int(
-    os.environ.get("JOB_RETENTION_SECONDS", "3600" if BILLING_ENABLED else "86400")
+    os.environ.get("JOB_RETENTION_SECONDS", "3600" if BILLING_ENABLED else "604800")
 )
+# Self-hosted deployments keep completed jobs for a week by default. Set this
+# false to disable retention sweeps; disk caps are configured separately.
+AUTO_CLEANUP_ENABLED = os.environ.get("AUTO_CLEANUP_ENABLED", "true").lower() in ("1", "true", "yes")
 # The retained download of a URL job (--keep-original) is the one artifact that
 # is a full copy of someone else's video rather than something we made, so it
 # can be aged out ahead of the clips it produced. Defaults to the job clock,
@@ -3145,6 +3148,9 @@ def _sweep_retained_sources(now=None):
 async def cleanup_jobs():
     """Background task to remove old jobs and files."""
     import time
+    if not AUTO_CLEANUP_ENABLED:
+        print("🧹 Automatic cleanup is disabled.")
+        return
     print("🧹 Cleanup task started.")
     while True:
         try:
@@ -5671,7 +5677,7 @@ async def get_config(response: Response):
         "youtubeUrlEnabled": not DISABLE_YOUTUBE_URL,
         "billingEnabled": BILLING_ENABLED,
         "googleAuthEnabled": bool(BILLING_ENABLED and cloud.settings.google_auth_enabled),
-        "jobRetentionSeconds": JOB_RETENTION_SECONDS,
+        "jobRetentionSeconds": JOB_RETENTION_SECONDS if AUTO_CLEANUP_ENABLED else 0,
         # Self-host only: tells the dashboard the Gemini key is optional
         # because the moment picker runs on an OpenAI-compatible server.
         "localLlm": None if BILLING_ENABLED else llm_backend.describe(),
@@ -6076,13 +6082,8 @@ async def process_endpoint(
     source_start: Optional[str] = Form(None),
     source_end: Optional[str] = Form(None),
 ):
+    selected_clips = None
     api_key = await resolve_gemini(request)
-    if not api_key and not (llm_backend.active() and not BILLING_ENABLED):
-        # Self-host with an OpenAI-compatible server configured needs no
-        # Google key for the core pipeline: the moment picker runs there and
-        # the frame-based stages degrade on their own (layout_picker returns
-        # "none", silent videos fail with a message that says why).
-        raise gemini_missing_error()
 
     ack_flag = str(acknowledged).lower() in ("1", "true", "yes")
     force_low = str(force_low_quality).lower() in ("1", "true", "yes")
@@ -6109,6 +6110,14 @@ async def process_endpoint(
         max_minutes = body.get("max_minutes")
         source_start = body.get("source_start")
         source_end = body.get("source_end")
+        selected_clips = body.get("selected_clips")
+
+    if (selected_clips is None and not api_key
+            and not (llm_backend.active() and not BILLING_ENABLED)):
+        # (prizm fork merge — snippy behavior) Explicit clip ranges do not
+        # need a selection model or a Gemini key. Automatic jobs retain the
+        # existing model requirement.
+        raise gemini_missing_error()
 
     # Normalize output format (auto = keep pipeline default).
     if output_format not in ("vertical", "horizontal", "square"):
@@ -6140,6 +6149,40 @@ async def process_endpoint(
 
     if not url and not file and not thumb_session and not upload_slot:
         raise HTTPException(status_code=400, detail="Must provide URL, File or upload_id")
+
+    # Explicitly selected ranges are an agent-render request, not a prompt for
+    # the normal automatic clip detector. Keep the validated ranges in a job
+    # file and pass that file to main.py so they survive worker/resume handoff.
+    if selected_clips is not None:
+        if not thumb_session:
+            raise HTTPException(status_code=400,
+                                detail="selected_clips requires a prepared thumbnail_session_id")
+        if not isinstance(selected_clips, list) or not 1 <= len(selected_clips) <= 15:
+            raise HTTPException(status_code=400,
+                                detail="selected_clips must contain 1 to 15 clip ranges")
+        source_duration = _media_duration_seconds(thumb_session["video_path"])
+        for index, clip in enumerate(selected_clips):
+            if not isinstance(clip, dict):
+                raise HTTPException(status_code=400, detail=f"selected_clips[{index}] must be an object")
+            start, end = clip.get("start"), clip.get("end")
+            if (isinstance(start, bool) or isinstance(end, bool)
+                    or not isinstance(start, (int, float))
+                    or not isinstance(end, (int, float))):
+                raise HTTPException(status_code=400,
+                                    detail=f"selected_clips[{index}] start and end must be numbers")
+            try:
+                finite_range = math.isfinite(float(start)) and math.isfinite(float(end))
+            except (OverflowError, ValueError):
+                finite_range = False
+            if not finite_range:
+                raise HTTPException(status_code=400,
+                                    detail=f"selected_clips[{index}] start and end must be finite numbers")
+            if start < 0 or end <= start or end - start < 5 or end - start > 180:
+                raise HTTPException(status_code=400,
+                                    detail=f"selected_clips[{index}] must be a 5-180 second range")
+            if source_duration > 0 and end > source_duration:
+                raise HTTPException(status_code=400,
+                                    detail=f"selected_clips[{index}] exceeds source duration")
 
     # Completion callback: reject unsafe targets NOW (clear 400) — delivery
     # re-validates anyway, but failing at submit is the debuggable behavior.
@@ -6189,6 +6232,11 @@ async def process_endpoint(
     # running this server. Every job then dies on `import cv2`. The quality
     # probe above already gets this right.
     cmd = [sys.executable, "-u", "main.py"] # -u for unbuffered
+    if selected_clips is not None:
+        selected_clips_path = os.path.join(job_output_dir, "selected_clips.json")
+        with open(selected_clips_path, "w", encoding="utf-8") as f:
+            json.dump(selected_clips, f)
+        cmd.extend(["--selected-clips", selected_clips_path])
     env = child_env()
     if api_key:
         env["GEMINI_API_KEY"] = api_key # Override with key from request
@@ -6256,9 +6304,12 @@ async def process_endpoint(
     # captions=false: the source already carries burned-in subtitles (or the
     # caller adds its own later), so skip the free auto-caption pass instead
     # of stacking a second layer. Absent → the deployment default (on).
-    if captions is not None and str(captions).lower() in ("0", "false", "no"):
+    if (selected_clips is not None
+            or (captions is not None and str(captions).lower() in ("0", "false", "no"))):
         env["AUTO_CAPTIONS"] = "0"
         print(f"[captions] job={job_id} auto-captions off")
+    if selected_clips is not None:
+        env["AUTO_HOOK"] = "0"
 
     input_path = None
     if url:
@@ -6348,6 +6399,18 @@ async def process_endpoint(
         # Daily paid-proxy budget hit: this job runs on the free routes only.
         env.pop("PROXY_URL", None)
 
+    if selected_clips is not None and partial:
+        cap_seconds = float(partial["processed_minutes"]) * 60
+        if any(clip["end"] > cap_seconds for clip in selected_clips):
+            if input_path and os.path.exists(input_path):
+                os.remove(input_path)
+            await _drop_unstarted_job(reservation_id, job_output_dir)
+            raise HTTPException(
+                status_code=402,
+                detail=(f"A selected clip ends beyond the {partial['processed_minutes']}-minute "
+                        "processing limit. Increase available processing minutes and retry."),
+            )
+
     # Pre-flight quality gate: probe the offered resolution BEFORE starting, so
     # the user can abort (refresh cookies / update yt-dlp) instead of burning
     # 20 min on a 360p-only source. Fail-open: any probe error starts normally.
@@ -6385,6 +6448,11 @@ async def process_endpoint(
         # main.py cuts the source down to this many minutes before anything
         # reads it, so the whole pipeline (and the editor) sees a short video.
         _apply_source_cut(env, partial)
+    elif selected_clips is not None:
+        # (prizm fork merge — snippy behavior) A stale deployment-level cap
+        # must not truncate a prepared source behind the selected ranges'
+        # back.
+        env.pop("MAX_SOURCE_MINUTES", None)
     if user_plan == "free":
         # Free-plan clips carry a burned-in watermark (applied by the main.py
         # subprocess after each clip renders).
@@ -10454,6 +10522,36 @@ async def thumbnail_frames(session_id: str, request: Request):
                 frames = []
             session["frames"] = frames
     return {"frames": session["frames"]}
+
+
+@app.get("/api/thumbnail/transcript/{session_id}")
+async def thumbnail_transcript(session_id: str, request: Request, offset: int = 0, limit: int = 100):
+    """Poll a thumbnail session's transcript and return bounded segment pages."""
+    session = thumbnail_sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    await _assert_job_owner(request, session)
+
+    offset = max(0, offset)
+    limit = min(250, max(1, limit))
+    if session.get("transcript_error"):
+        return {"session_id": session_id, "status": "failed", "error": session["transcript_error"]}
+    if not session.get("transcript_ready"):
+        return {"session_id": session_id, "status": "processing"}
+
+    segments = session.get("transcript_segments") or []
+    page = segments[offset:offset + limit]
+    next_offset = offset + len(page)
+    if next_offset >= len(segments):
+        next_offset = None
+    return {
+        "session_id": session_id,
+        "status": "ready",
+        "segments": page,
+        "next_offset": next_offset,
+        "duration_seconds": session.get("video_duration", 0),
+        "language": session.get("language", "en"),
+    }
 
 
 class ThumbnailDescribeRequest(BaseModel):

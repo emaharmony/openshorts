@@ -1624,7 +1624,7 @@ def trim_subtitle_band(input_video, band):
 
 def render_clip(input_video, final_output_video, output_format="auto",
                 force_strategy=None, crop_overrides=None, watermark=False,
-                subtitle_band=None):
+                subtitle_band=None, inset_hint=None):
     """Route a cut clip through the right renderer for the chosen output format.
     vertical/auto -> 9:16 reframe, square -> 1:1 reframe, horizontal -> keep.
     ``force_strategy`` (e.g. 'WIDE'/'TRACK') pins every scene's layout — the
@@ -1640,14 +1640,16 @@ def render_clip(input_video, final_output_video, output_format="auto",
     trimmed = trim_subtitle_band(input_video, subtitle_band)
     try:
         return _render_clip(trimmed, final_output_video, output_format,
-                            force_strategy, crop_overrides, watermark)
+                            force_strategy, crop_overrides, watermark,
+                            inset_hint)
     finally:
         if trimmed != input_video and os.path.exists(trimmed):
             os.remove(trimmed)
 
 
 def _render_clip(input_video, final_output_video, output_format,
-                 force_strategy, crop_overrides, watermark):
+                 force_strategy, crop_overrides, watermark,
+                 inset_hint=None):
     if output_format == "horizontal":
         ok = finalize_clip_passthrough(input_video, final_output_video)
         if ok and watermark:
@@ -1657,7 +1659,8 @@ def _render_clip(input_video, final_output_video, output_format,
     return process_video_to_vertical(input_video, final_output_video, aspect_ratio=aspect,
                                      force_strategy=force_strategy,
                                      crop_overrides=crop_overrides,
-                                     watermark=watermark)
+                                     watermark=watermark,
+                                     inset_hint=inset_hint)
 
 
 # Watermark geometry, as fractions of the clip width/height.
@@ -1772,7 +1775,8 @@ def mark_delivery(final_path, marker=None):
 
 
 def process_video_to_vertical(input_video, final_output_video, aspect_ratio=ASPECT_RATIO,
-                              force_strategy=None, crop_overrides=None, watermark=False):
+                              force_strategy=None, crop_overrides=None, watermark=False,
+                              inset_hint=None):
     """
     Core logic to reframe a horizontal video to a target aspect ratio using
     scene detection and Active Speaker Tracking (MediaPipe).
@@ -1790,7 +1794,8 @@ def process_video_to_vertical(input_video, final_output_video, aspect_ratio=ASPE
             result = reframe_v2.render(input_video, final_output_video, aspect_ratio,
                                        force_strategy=force_strategy,
                                        crop_overrides=crop_overrides,
-                                       watermark=watermark)
+                                       watermark=watermark,
+                                       inset_hint=inset_hint)
             print(f"   ⏱️ Reframe v2 total: {time.time() - t0:.1f}s")
             return result
         except Exception as e:
@@ -2322,6 +2327,14 @@ def score_batch_size():
     return 3 if llm_backend.active() else 8
 
 
+def speaker_note():
+    """Optional deployment-level note about the on-camera person(s), e.g.
+    pronouns. ``SPEAKER_NOTE`` env var; empty string when unset. Injected
+    into the detail prompt's COPY RULES so titles/hooks do not guess the
+    speaker's gender from vibes. Fixes the 'he' default on female streamers."""
+    return os.environ.get("SPEAKER_NOTE", "").strip()
+
+
 def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
     """Two-pass clip selection: score transcript windows, then detail the best.
 
@@ -2432,6 +2445,7 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
             def build(ws):
                 return gemini_worker.DETAIL_PROMPT_TEMPLATE.format(
                     video_duration=video_duration, language=language,
+                    speaker_note=speaker_note(),
                     min_clips=lo, max_clips=hi,
                     min_secs=min_secs, max_secs=max_secs,
                     windows_json=json.dumps(_payload(ws), ensure_ascii=False))
@@ -2762,9 +2776,23 @@ if __name__ == '__main__':
     parser.add_argument('--prepare-only', action='store_true',
                         help="Fetch the source (download, cut to the paid minutes), print "
                              "SOURCE_READY <path> and exit: a remote worker renders it.")
+    parser.add_argument('--selected-clips', type=str,
+                        help="Path to explicit source-time clip ranges; skips automatic clip selection.")
 
     args = parser.parse_args()
     output_format = args.format
+    if args.selected_clips:
+        # Manual MCP renders follow the fixed no-caption, no-hook output policy
+        # even when resumed under a different process environment.
+        os.environ["AUTO_CAPTIONS"] = "0"
+        os.environ["AUTO_HOOK"] = "0"
+        os.environ["HOOK_GROUNDING"] = "0"
+        os.environ["SKIP_SCREENCAST_MODEL"] = "1"
+        # Agent-selected clips still use the fixed, local screen/camera
+        # detector so OBS camera insets render in the dedicated lower band.
+        # This enables only the deterministic screencast path; it does not
+        # invoke the video-level layout picker or any model.
+        os.environ["SCREENCAST_LAYOUT"] = "1"
 
     script_start_time = time.time()
 
@@ -2887,6 +2915,7 @@ if __name__ == '__main__':
 
         use_early = (not args.skip_analysis and not args.transcript
                      and not args.prepare_only
+                     and not args.selected_clips
                      and os.environ.get("EARLY_AUDIO", "1").strip() != "0"
                      and not os.environ.get("MAX_SOURCE_MINUTES", "").strip()
                      and not os.path.exists(os.path.join(output_dir, TRANSCRIPT_CHECKPOINT)))
@@ -2948,7 +2977,7 @@ if __name__ == '__main__':
     # instead of one per clip, and the answer is a property of the material
     # ("this is a screencast"), which does not change between its own clips.
     # It runs before any render so the modules are switched on in time.
-    if layout_picker.ENABLED:
+    if layout_picker.ENABLED and not args.selected_clips:
         try:
             _cap = cv2.VideoCapture(input_video)
             _fps = _cap.get(cv2.CAP_PROP_FPS) or 30.0
@@ -3015,7 +3044,7 @@ if __name__ == '__main__':
         # Module handover (issue #68): another module already transcribed this
         # exact source with the same backend, so reuse its output. Any problem
         # with the file falls back to transcribing normally rather than failing.
-        if args.transcript:
+        if args.transcript and not args.selected_clips:
             try:
                 with open(args.transcript, 'r') as f:
                     transcript = json.load(f)
@@ -3027,7 +3056,7 @@ if __name__ == '__main__':
                 print(f"⚠️ Could not use precomputed transcript ({e}) — transcribing normally.")
                 transcript = None
         early_state = globals().get("early")
-        if transcript is None and early_state is not None:
+        if transcript is None and early_state is not None and not args.selected_clips:
             with early_state["lock"]:
                 early_state["abandoned"] = True  # a late audio would only duplicate work
                 started = early_state["started"]
@@ -3038,20 +3067,20 @@ if __name__ == '__main__':
                     print(f"♻️ Using the transcript made while the video downloaded "
                           f"({len(transcript['segments'])} segments).")
                     save_transcript_checkpoint(output_dir, transcript, input_video, duration)
-        if transcript is None:
+        if transcript is None and not args.selected_clips:
             transcript = load_transcript_checkpoint(output_dir, input_video, duration)
             if transcript is not None:
                 print(f"♻️ Reusing the transcript from the interrupted run "
                       f"({len(transcript['segments'])} segments) — skipping transcription.")
-        # Another job already transcribed this very source (download cache).
+        # (prizm fork merge) cache check (upstream) — skipped for explicit ranges (snippy)
         transcript_from_cache = False
-        if transcript is None and args.url:
+        if transcript is None and args.url and not args.selected_clips:
             import source_cache
             transcript = source_cache.fetch_transcript(args.url, duration)
             if transcript is not None:
                 transcript_from_cache = True
                 save_transcript_checkpoint(output_dir, transcript, input_video, duration)
-        if transcript is None:
+        if transcript is None and not args.selected_clips:
             try:
                 transcript = transcribe_video(input_video)
                 save_transcript_checkpoint(output_dir, transcript, input_video, duration)
@@ -3061,6 +3090,8 @@ if __name__ == '__main__':
             # Kept only when this job's source is the cached file, uncut.
             import source_cache
             source_cache.store_transcript(args.url, duration, transcript, input_video)
+        elif args.selected_clips and transcript is None:
+            print("⏩ Skipping transcription; explicit clip ranges need no transcript.")
 
         # Music-only or wordless footage transcribes to a handful of words.
         # Clip it by what is on screen instead, like a video with no audio.
@@ -3070,9 +3101,46 @@ if __name__ == '__main__':
                   f"switching to visual analysis.")
             transcript = None
 
-        # 4. Gemini Analysis (transcript-driven, or vision for silent videos)
+        # 4. Explicit ranges bypass both transcript and vision clip detection.
+        # The MCP caller has already selected these source-time ranges.
         early_clips = (early_state or {}).get("clips") if early_state else None
-        if (transcript is not None and early_clips
+        if args.selected_clips:
+            try:
+                with open(args.selected_clips, 'r', encoding='utf-8') as f:
+                    selected = json.load(f)
+                if not isinstance(selected, list) or not selected:
+                    raise ValueError("selected clip file must contain a non-empty list")
+                shorts = []
+                for i, item in enumerate(selected):
+                    start, end = item.get('start'), item.get('end')
+                    if (isinstance(start, bool) or isinstance(end, bool)
+                            or not isinstance(start, (int, float))
+                            or not isinstance(end, (int, float))):
+                        raise ValueError(f"selected clip {i + 1} must have numeric source-time bounds")
+                    try:
+                        finite_range = math.isfinite(float(start)) and math.isfinite(float(end))
+                    except (OverflowError, ValueError):
+                        finite_range = False
+                    if (not finite_range
+                            or start < 0 or end <= start or end - start < 5
+                            or end - start > 180 or end > duration):
+                        raise ValueError(f"selected clip {i + 1} has an invalid source-time range")
+                    title = item.get('title') or f"Clip {i + 1}"
+                    description = item.get('description') or ""
+                    shorts.append({
+                        'start': start,
+                        'end': end,
+                        'title': title,
+                        'description': description,
+                        'video_title_for_youtube_short': title,
+                        'video_description_for_tiktok': description,
+                        'viral_hook_text': item.get('viral_hook_text', ''),
+                    })
+                clips_data = {'shorts': shorts}
+                print(f"⏩ Using {len(shorts)} explicitly selected ranges; skipping automatic clip detection.")
+            except Exception as e:
+                raise RuntimeError(f"Could not load explicit clip ranges: {e}") from e
+        elif (transcript is not None and early_clips
                 and transcript is early_state["transcript"]):
             print("♻️ Using the clips Gemini picked while the video downloaded.")
             clips_data = early_clips

@@ -575,6 +575,12 @@ def screen_ranges(input_video, scenes, fps, strategies):
     declared a screencast, and an explicit choice must not silently render
     the blurred-strip layout it was chosen to avoid.
     """
+    if os.environ.get("SKIP_SCREENCAST_MODEL", "0").strip() == "1":
+        ranges = screencast_layout.fallback_ranges(scenes, strategies, fps)
+        print(f"   🖥️ Screen check using deterministic scene fallback; "
+              f"{len(ranges)} face-less scene(s) treated as the screen")
+        return ranges
+
     ranges = screencast_layout.detect_content_ranges(input_video, scenes, fps)
     if ranges is None:
         ranges = screencast_layout.fallback_ranges(scenes, strategies, fps)

@@ -39,11 +39,33 @@ replacements nor touch money.
 
 ## MCP server (`mcp_server.py`, always mounted)
 
-Stateless Streamable-HTTP JSON-RPC at `/mcp`, no SDK dependency, ~3 methods + 8
+Stateless Streamable-HTTP JSON-RPC at `/mcp`, no SDK dependency, ~3 methods + 11
 tools. Each tool calls back into this same app in-process
 (`httpx.ASGITransport`) forwarding the caller's auth headers, so it can never
 drift from the REST behaviour. Cloud mode 401s without a resolvable user;
 self-host stays BYOK-open.
+
+For Codex-led clip selection, use `prepare_video` → `get_transcript` →
+`render_selected_clips` → `get_job_status` / `list_clips`. Preparation uses
+the thumbnail transcription session and does not run the automatic clip
+selector. The transcript contains source-time word timestamps. The render tool
+submits up to 15 explicit source ranges (5–180 seconds each); the normal
+renderer, hooks, metering, and ownership checks still apply. Generated captions
+are disabled globally; source text already burned into the video is preserved. YouTube
+URLs, public Twitch VOD URLs (`twitch.tv/videos/<id>` or
+`twitch.tv/<channel>/video/<id>`), and completed `create_upload` uploads (as
+`upload_id`) are supported for this agent-selection flow; unsupported links
+should be reported instead of silently routed elsewhere. Twitch clips and
+non-VOD pages are not supported. Subscriber-only, deleted, or otherwise
+restricted VODs may fail because this workflow does not use Twitch credentials.
+Do not request, store, or forward Twitch cookies or tokens. Ask the user to
+confirm ownership or processing rights before preparing the source; a URL
+alone is not consent. In Codex, hosted access requires an authenticated
+OpenShorts account through MCP OAuth or an API key; self-hosted access follows
+the server configuration. By contrast,
+`process_video` runs OpenShorts' automatic moment selector and is appropriate
+when the user explicitly wants OpenShorts to choose the clips. Publishing is a
+separate action.
 
 ## stdio transport (`mcp_stdio.py`)
 

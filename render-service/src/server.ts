@@ -39,6 +39,18 @@ const renderRequestSchema = z.object({
   }),
 });
 
+function fixedOutputProps(props: z.infer<typeof renderRequestSchema>["props"]) {
+  return {
+    ...props,
+    width: 1080,
+    height: 1920,
+    hook: null,
+    // Full-frame fit is enforced in ShortVideo; drop caller crop/zoom/effects.
+    effects: null,
+    subtitles: { captions: [] },
+  };
+}
+
 // --- Express app ---
 
 const app = express();
@@ -68,6 +80,7 @@ app.post("/render", (req, res) => {
   }
 
   const { jobId, clipIndex, props } = parsed.data;
+  const fixedProps = fixedOutputProps(props);
   const renderId = uuidv4();
 
   const job: RenderJob = {
@@ -98,16 +111,7 @@ app.post("/render", (req, res) => {
     renderId,
     jobId,
     clipIndex,
-    props: {
-      videoUrl: resolvedVideoUrl,
-      durationInFrames: props.durationInFrames,
-      fps: props.fps,
-      width: props.width,
-      height: props.height,
-      subtitles: props.subtitles ?? null,
-      hook: props.hook ?? null,
-      effects: props.effects ?? null,
-    },
+    props: { ...fixedProps, videoUrl: resolvedVideoUrl },
   }).catch((err) => {
     console.error(`[render] Unhandled error for ${renderId}:`, err);
     const existingJob = renderJobs.get(renderId);

@@ -1,5 +1,10 @@
 import { renderMediaOnWeb } from '@remotion/web-renderer';
 import { ShortVideo } from '../remotion/compositions/ShortVideo';
+import {
+    FIXED_CAPTION_MAX_CHARS,
+    FIXED_CAPTION_MAX_DURATION_MS,
+    FIXED_SUBTITLE_STYLE,
+} from '../remotion/lib/types';
 
 /**
  * Renders a Remotion composition directly in the browser using WebCodecs.
@@ -24,6 +29,13 @@ export async function renderInBrowser({
     onProgress,
     signal,
 }) {
+    const fixedSubtitles = {
+        captions: [],
+        position: 'bottom',
+        maxChars: FIXED_CAPTION_MAX_CHARS,
+        maxDurationMs: FIXED_CAPTION_MAX_DURATION_MS,
+        style: FIXED_SUBTITLE_STYLE,
+    };
     const fps = 30;
     const durationInFrames = Math.max(1, Math.round(durationInSeconds * fps));
 
@@ -43,9 +55,9 @@ export async function renderInBrowser({
             fps,
             width: 1080,
             height: 1920,
-            subtitles,
-            hook,
-            effects,
+            subtitles: fixedSubtitles,
+            hook: null,
+            effects: null,
         },
         container: 'mp4',
         videoCodec: 'h264',

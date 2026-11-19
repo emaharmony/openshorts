@@ -5,7 +5,6 @@ import { apiFetch, QuotaError, openQuotaWall } from '../lib/api';
 import { platformOptions as buildPlatformOptions, defaultPlatformFlags, flagsFromList } from '../lib/socialPlatforms';
 import { track } from '../lib/analytics';
 import SubtitleModal from './SubtitleModal';
-import HookModal from './HookModal';
 import TranslateModal from './TranslateModal';
 import Modal from './ui/Modal';
 import SegmentedControl from './ui/SegmentedControl';
@@ -260,9 +259,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
 
     const [isEditing, setIsEditing] = useState(false);
     const [isSubtitling, setIsSubtitling] = useState(false);
-    const [isHooking, setIsHooking] = useState(false);
     const [isTranslating, setIsTranslating] = useState(false);
-    const [showHookModal, setShowHookModal] = useState(false);
     const [showTranslateModal, setShowTranslateModal] = useState(false);
     const [editError, setEditError] = useState(null);
 
@@ -329,11 +326,6 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     // Browser (Remotion) renders compose over the ORIGINAL clip, so using them
     // here would silently drop those burns — chain via server FFmpeg instead.
     const hasServerBurns = /(^|_)(subtitled|hook|hooked)_/.test(serverVideoFile || '');
-
-    // The hook currently burned into the server file (auto-hook or a manual
-    // one). /api/hook REPLACES it; tracked locally so the modal stays honest
-    // after edits without refetching the job.
-    const [burnedHook, setBurnedHook] = useState(clip.auto_hook?.text || null);
 
     // Fetch clip duration from transcript endpoint
     useEffect(() => {
@@ -409,15 +401,18 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 const data = await effectsRes.json();
                 if (data.effects && data.effects.segments) {
                     const newLayers = { ...activeLayers, effects: data.effects };
-                    setActiveLayers(newLayers);
-                    const blobUrl = await renderInBrowser({
-                        videoUrl: originalVideoUrl,
-                        durationInSeconds: clipDuration,
-                        subtitles: newLayers.subtitles,
-                        hook: newLayers.hook,
-                        effects: newLayers.effects,
-                    });
-                    setCurrentVideoUrl(blobUrl);
+                    if (newLayers.subtitles?.captions?.length) {
+                        setActiveLayers(newLayers);
+                        const blobUrl = await renderInBrowser({
+                            videoUrl: originalVideoUrl,
+                            durationInSeconds: clipDuration,
+                            subtitles: newLayers.subtitles,
+                        });
+                        setCurrentVideoUrl(blobUrl);
+                    } else {
+                        setEditError('Auto effects are unavailable without word-level captions; fixed framing is kept.');
+                        setTimeout(() => setEditError(null), 5000);
+                    }
                     if (videoRef.current) videoRef.current.load();
                     return;
                 }
@@ -485,13 +480,11 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 setServerVideoFile(data.new_video_url.split('/').pop());
                 const remaining = { ...activeLayers, subtitles: null };
                 setActiveLayers(remaining);
-                if (remaining.hook || remaining.effects) {
+                if (remaining.subtitles?.captions?.length) {
                     setCurrentVideoUrl(await renderInBrowser({
                         videoUrl: serverUrl,
                         durationInSeconds: clipDuration,
-                        subtitles: null,
-                        hook: remaining.hook,
-                        effects: remaining.effects,
+                        subtitles: remaining.subtitles,
                     }));
                 } else {
                     setCurrentVideoUrl(serverUrl);
@@ -572,13 +565,11 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 // layers (hook/effects) over the new file so they aren't lost.
                 const remaining = { ...activeLayers, subtitles: null };
                 setActiveLayers(remaining);
-                if (remaining.hook || remaining.effects) {
+                if (remaining.subtitles?.captions?.length) {
                     const blobUrl = await renderInBrowser({
                         videoUrl: serverUrl,
                         durationInSeconds: clipDuration,
-                        subtitles: null,
-                        hook: remaining.hook,
-                        effects: remaining.effects,
+                        subtitles: remaining.subtitles,
                     });
                     setCurrentVideoUrl(blobUrl);
                 } else {
@@ -592,97 +583,6 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             setTimeout(() => setEditError(null), 5000);
         } finally {
             setIsSubtitling(false);
-        }
-    };
-
-    const handleHook = async (hookData) => {
-        setIsHooking(true);
-        setEditError(null);
-        try {
-            if (hookData.remotion && !hasServerBurns) {
-                // Accumulate layer and render all layers together
-                const newLayers = { ...activeLayers, hook: hookData.remotion };
-                setActiveLayers(newLayers);
-                const blobUrl = await renderInBrowser({
-                    videoUrl: originalVideoUrl,
-                    durationInSeconds: clipDuration,
-                    subtitles: newLayers.subtitles,
-                    hook: newLayers.hook,
-                    effects: newLayers.effects,
-                });
-                setCurrentVideoUrl(blobUrl);
-                if (videoRef.current) videoRef.current.load();
-                setShowHookModal(false);
-                return;
-            }
-
-            // Fallback: legacy FFmpeg
-            const payload = typeof hookData === 'string'
-                ? { text: hookData, position: 'top', size: 'M' }
-                : hookData;
-
-            const res = await apiFetch('/api/hook', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    job_id: jobId,
-                    clip_index: index,
-                    text: payload.text,
-                    position: payload.position,
-                    size: payload.size,
-                    style: payload.style || 'pill',
-                    font: payload.font || null,
-                    duration_seconds: payload.remotion?.displayDurationSec ?? null,
-                    input_filename: serverVideoFile
-                })
-            });
-
-            if (!res.ok) throw new Error(await res.text());
-            const data = await res.json();
-            if (data.new_video_url) {
-                setCurrentVideoUrl(getApiUrl(data.new_video_url));
-                setServerVideoFile(data.new_video_url.split('/').pop());
-                setBurnedHook(data.burned_hook?.text ?? payload.text ?? null);
-                if (videoRef.current) videoRef.current.load();
-                setShowHookModal(false);
-            }
-        } catch (e) {
-            setEditError(e.message);
-            setTimeout(() => setEditError(null), 5000);
-        } finally {
-            setIsHooking(false);
-        }
-    };
-
-    // Strip the burned hook (auto-hook or manual) off the server file.
-    const handleRemoveHook = async () => {
-        setIsHooking(true);
-        setEditError(null);
-        try {
-            const res = await apiFetch('/api/hook', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    job_id: jobId,
-                    clip_index: index,
-                    remove: true,
-                    input_filename: serverVideoFile,
-                }),
-            });
-            if (!res.ok) throw new Error(await res.text());
-            const data = await res.json();
-            if (data.new_video_url) {
-                setCurrentVideoUrl(getApiUrl(data.new_video_url));
-                setServerVideoFile(data.new_video_url.split('/').pop());
-                setBurnedHook(null);
-                if (videoRef.current) videoRef.current.load();
-                setShowHookModal(false);
-            }
-        } catch (e) {
-            setEditError(e.message);
-            setTimeout(() => setEditError(null), 5000);
-        } finally {
-            setIsHooking(false);
         }
     };
 
@@ -1116,15 +1016,6 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                     </button>
 
                     <button
-                        onClick={() => setShowHookModal(true)}
-                        disabled={isHooking}
-                        className={QUIET_BTN}
-                    >
-                        {isHooking ? <Loader2 size={16} className="animate-spin text-brass shrink-0" /> : <Wand2 size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />}
-                        {isHooking ? 'saving…' : 'edit hook'}
-                    </button>
-
-                    <button
                         onClick={() => setShowTranslateModal(true)}
                         disabled={isTranslating}
                         className={QUIET_BTN}
@@ -1323,29 +1214,12 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                     await onBulkSubtitle(options);
                     setShowSubtitleModal(false);
                 } : undefined}
-                onRemove={handleRemoveSubtitles}
                 bulkCount={clipCount}
                 bulkProgress={bulkProgress}
                 isProcessing={isSubtitling || (bulkProgress?.running ?? false)}
                 videoUrl={originalVideoUrl}
                 jobId={jobId}
                 clipIndex={index}
-                existingHook={activeLayers.hook}
-            />
-
-            <HookModal
-                isOpen={showHookModal}
-                onClose={() => setShowHookModal(false)}
-                onGenerate={handleHook}
-                isProcessing={isHooking}
-                videoUrl={originalVideoUrl}
-                initialText={clip.viral_hook_text}
-                durationInSeconds={clip.end && clip.start ? clip.end - clip.start : 30}
-                existingSubtitles={activeLayers.subtitles}
-                hasCaptions={!!activeLayers.subtitles || /(^|_)subtitled_/.test(serverVideoFile || '')}
-                serverRender={hasServerBurns}
-                burnedHook={burnedHook}
-                onRemove={burnedHook ? handleRemoveHook : null}
             />
 
             <TranslateModal

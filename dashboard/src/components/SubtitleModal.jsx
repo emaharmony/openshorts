@@ -229,7 +229,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
         maxDurationMs: maxDuration * 1000,
         style: {
             fontFamily: fontName,
-            fontSize: Math.round(fontSize * 0.85 * PREVIEW_PX_PER_UNIT),
+            fontSize: 28,
             fontColor,
             highlightColor,
             borderColor,
@@ -312,106 +312,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
                 {/* Right: Controls */}
                 <div className="w-full md:w-80 flex flex-col">
                     <div className="space-y-5 flex-1 overflow-y-auto custom-scrollbar pr-1">
-                        {/* Caption presets (server-side karaoke burn) */}
-                        <div>
-                            <p className="eyebrow mb-2">Preset</p>
-                            <div className="grid grid-cols-3 gap-1.5">
-                                {CAPTION_PRESETS.map((p) => (
-                                    <button
-                                        key={p.id}
-                                        onClick={() => applyPreset(p)}
-                                        className={`px-2 py-1.5 rounded-input border text-xs transition-colors flex items-center gap-1.5 justify-center
-                                            ${activePreset === p.id
-                                                ? 'border-[color:var(--color-accent)] text-ink'
-                                                : 'border-rule2 text-muted hover:border-[color:var(--color-accent)]'}`}
-                                        title={p.label}
-                                    >
-                                        <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: p.highlightColor }} />
-                                        {p.label}
-                                    </button>
-                                ))}
-                            </div>
-                            {style === 'karaoke' && (
-                                <div className="mt-3 space-y-3 animate-fade">
-                                    <div className="flex items-center justify-between">
-                                        <span className="readout">UPPERCASE</span>
-                                        <label className="relative inline-flex items-center cursor-pointer">
-                                            <input type="checkbox" checked={uppercase} onChange={(e) => setUppercase(e.target.checked)} className="sr-only peer" />
-                                            <div className="w-8 h-4 rounded-full bg-paper3 peer-checked:bg-brass transition-colors after:content-[''] after:absolute after:top-0 after:left-0 after:h-4 after:w-4 after:rounded-full after:bg-ink after:transition-all peer-checked:after:translate-x-full"></div>
-                                        </label>
-                                    </div>
-                                    <div>
-                                        <div className="flex justify-between mb-1">
-                                            <span className="readout">Dim inactive words</span>
-                                            <span className="readout">{Math.round(baseOpacity * 100)}%</span>
-                                        </div>
-                                        <input
-                                            type="range"
-                                            min="30"
-                                            max="100"
-                                            value={Math.round(baseOpacity * 100)}
-                                            onChange={(e) => setBaseOpacity(parseInt(e.target.value) / 100)}
-                                            className="w-full accent-[var(--color-accent)]"
-                                        />
-                                    </div>
-                                </div>
-                            )}
-                        </div>
-
-                        {/* Position Selector */}
-                        <div>
-                            <p className="eyebrow mb-2">Position</p>
-                            <SegmentedControl
-                                options={POSITION_OPTIONS}
-                                value={position}
-                                onChange={setPosition}
-                                size="sm"
-                            />
-                        </div>
-
-                        {/* Size */}
-                        <div>
-                            <p className="eyebrow mb-2">Size</p>
-                            <SegmentedControl
-                                options={SIZE_OPTIONS}
-                                value={fontSize}
-                                onChange={setFontSize}
-                                size="sm"
-                            />
-                        </div>
-
-                        {style === 'karaoke' && (
-                            <div className="space-y-3">
-                                <div className="flex items-center justify-between">
-                                    <span className="readout">One word at a time</span>
-                                    <label className="relative inline-flex items-center cursor-pointer">
-                                        <input type="checkbox" checked={oneWord} onChange={(e) => setOneWord(e.target.checked)} className="sr-only peer" />
-                                        <div className="w-8 h-4 rounded-full bg-paper3 peer-checked:bg-brass transition-colors after:content-[''] after:absolute after:top-0 after:left-0 after:h-4 after:w-4 after:rounded-full after:bg-ink after:transition-all peer-checked:after:translate-x-full"></div>
-                                    </label>
-                                </div>
-                                {!oneWord && (
-                                    <div className="flex items-center justify-between">
-                                        <span className="readout">Reveal word by word</span>
-                                        <label className="relative inline-flex items-center cursor-pointer">
-                                            <input type="checkbox" checked={reveal} onChange={(e) => setReveal(e.target.checked)} className="sr-only peer" />
-                                            <div className="w-8 h-4 rounded-full bg-paper3 peer-checked:bg-brass transition-colors after:content-[''] after:absolute after:top-0 after:left-0 after:h-4 after:w-4 after:rounded-full after:bg-ink after:transition-all peer-checked:after:translate-x-full"></div>
-                                        </label>
-                                    </div>
-                                )}
-                            </div>
-                        )}
-
-                        {/* Animation Style (new) */}
-                        <div>
-                            <p className="eyebrow mb-2">Animation</p>
-                            <SegmentedControl
-                                options={ANIMATION_OPTIONS}
-                                value={animation}
-                                onChange={setAnimation}
-                                columns={2}
-                                size="sm"
-                            />
-                        </div>
+                        <p className="readout">Fixed style: karaoke captions, 28px, bottom aligned, tight margin.</p>
 
                         {/* Editable Transcript (collapsible) */}
                         {useRemotionPreview && (
@@ -437,115 +338,6 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
                             </div>
                         )}
 
-                        {/* Font Family */}
-                        <div>
-                            <p className="eyebrow mb-2">Font</p>
-                            <select
-                                value={fontName}
-                                onChange={(e) => setFontName(e.target.value)}
-                                className="input-field"
-                            >
-                                {FONT_OPTIONS.map((f) => (
-                                    <option key={f.value} value={f.value} style={{ fontFamily: f.value }}>{f.label}</option>
-                                ))}
-                            </select>
-                        </div>
-
-                        {/* Text Color */}
-                        <div>
-                            <p className="eyebrow mb-2">Text color</p>
-                            <div className="flex flex-wrap items-center gap-2.5">
-                                {COLOR_PRESETS.map((c) => (
-                                    <button
-                                        key={c.color}
-                                        onClick={() => setFontColor(c.color)}
-                                        className={swatchClass(fontColor === c.color)}
-                                        style={{ backgroundColor: c.color }}
-                                        title={c.label}
-                                    />
-                                ))}
-                                <label className="w-6 h-6 rounded-full border border-dashed border-rule2 cursor-pointer flex items-center justify-center hover:border-brass transition-colors overflow-hidden relative" title="Custom color">
-                                    <span className="text-xs text-muted leading-none">+</span>
-                                    <input type="color" value={fontColor} onChange={(e) => setFontColor(e.target.value)} className="absolute inset-0 opacity-0 cursor-pointer" />
-                                </label>
-                            </div>
-                        </div>
-
-                        {/* Highlight Color (new) */}
-                        <div>
-                            <p className="eyebrow mb-2">Highlight</p>
-                            <div className="flex flex-wrap items-center gap-2.5">
-                                {HIGHLIGHT_PRESETS.map((c) => (
-                                    <button
-                                        key={c.color}
-                                        onClick={() => setHighlightColor(c.color)}
-                                        className={swatchClass(highlightColor === c.color)}
-                                        style={{ backgroundColor: c.color }}
-                                        title={c.label}
-                                    />
-                                ))}
-                            </div>
-                        </div>
-
-                        {/* Border / Outline */}
-                        <div>
-                            <p className="eyebrow mb-2">Border</p>
-                            <div className="flex items-center gap-3">
-                                <label className="relative w-8 h-8 rounded-input border border-rule2 cursor-pointer overflow-hidden shrink-0" title="Border color">
-                                    <div className="w-full h-full" style={{ backgroundColor: borderColor }} />
-                                    <input type="color" value={borderColor} onChange={(e) => setBorderColor(e.target.value)} className="absolute inset-0 opacity-0 cursor-pointer" />
-                                </label>
-                                <div className="flex-1">
-                                    <input
-                                        type="range"
-                                        min="0"
-                                        max="5"
-                                        value={borderWidth}
-                                        onChange={(e) => setBorderWidth(parseInt(e.target.value))}
-                                        className="w-full accent-[var(--color-accent)]"
-                                    />
-                                    <div className="flex justify-between">
-                                        <span className="readout">None</span>
-                                        <span className="readout">Thick</span>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        {/* Background Box */}
-                        <div>
-                            <div className="flex items-center justify-between mb-2">
-                                <p className="eyebrow">Background</p>
-                                <label className="relative inline-flex items-center cursor-pointer">
-                                    <input type="checkbox" checked={bgOpacity > 0} onChange={(e) => setBgOpacity(e.target.checked ? 0.5 : 0)} className="sr-only peer" />
-                                    <div className="w-8 h-4 rounded-full bg-paper3 peer-checked:bg-brass transition-colors after:content-[''] after:absolute after:top-0 after:left-0 after:h-4 after:w-4 after:rounded-full after:bg-ink after:transition-all peer-checked:after:translate-x-full"></div>
-                                </label>
-                            </div>
-                            {bgOpacity > 0 && (
-                                <div className="space-y-3 animate-fade">
-                                    <div className="flex items-center gap-3">
-                                        <label className="relative w-8 h-8 rounded-input border border-rule2 cursor-pointer overflow-hidden shrink-0" title="Background color">
-                                            <div className="w-full h-full" style={{ backgroundColor: bgColor }} />
-                                            <input type="color" value={bgColor} onChange={(e) => setBgColor(e.target.value)} className="absolute inset-0 opacity-0 cursor-pointer" />
-                                        </label>
-                                        <div className="flex-1">
-                                            <input
-                                                type="range"
-                                                min="10"
-                                                max="100"
-                                                value={Math.round(bgOpacity * 100)}
-                                                onChange={(e) => setBgOpacity(parseInt(e.target.value) / 100)}
-                                                className="w-full accent-[var(--color-accent)]"
-                                            />
-                                            <div className="flex justify-between">
-                                                <span className="readout">Transparent</span>
-                                                <span className="readout">{Math.round(bgOpacity * 100)}%</span>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            )}
-                        </div>
                     </div>
 
                     <div className="mt-5 shrink-0 space-y-2">
@@ -594,15 +386,6 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
                                     {/* Clips ship captioned by default, so the way
                                         out has to be here — otherwise a user who
                                         doesn't want captions is stuck with them. */}
-                                    {onRemove && (
-                                        <button
-                                            onClick={onRemove}
-                                            disabled={isProcessing}
-                                            className="text-xs text-muted underline underline-offset-2 lowercase hover:text-ink2 disabled:opacity-50"
-                                        >
-                                            remove captions from this clip
-                                        </button>
-                                    )}
                                 </>
                             );
                         })()}

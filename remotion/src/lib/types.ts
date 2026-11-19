@@ -23,6 +23,20 @@ export interface SubtitleStyle {
   animation: SubtitleAnimation;
 }
 
+export const FIXED_SUBTITLE_STYLE: SubtitleStyle = {
+  fontFamily: "Anton",
+  fontSize: 28,
+  fontColor: "#FFFFFF",
+  highlightColor: "#FFE500",
+  borderColor: "#000000",
+  borderWidth: 3,
+  bgColor: "#000000",
+  bgOpacity: 0,
+  animation: "karaoke",
+};
+export const FIXED_CAPTION_MAX_CHARS = 16;
+export const FIXED_CAPTION_MAX_DURATION_MS = 1400;
+
 export interface SubtitleConfig {
   captions: CaptionWord[];
   position: SubtitlePosition;
@@ -81,9 +95,13 @@ export interface ShortVideoProps {
 
 // --- Zod schemas for validation (used by render service) ---
 export const captionWordSchema = z.object({
-  text: z.string(),
-  startMs: z.number(),
-  endMs: z.number(),
+  text: z.string().trim().min(1),
+  startMs: z.number().finite().nonnegative(),
+  endMs: z.number().finite().nonnegative(),
+}).refine((word) => word.endMs > word.startMs
+    && !/\s/u.test(word.text)
+    && /[\p{L}\p{N}]/u.test(word.text), {
+  message: "Caption must be one non-whitespace word token with a letter or number and endMs > startMs",
 });
 
 export const subtitleStyleSchema = z.object({
