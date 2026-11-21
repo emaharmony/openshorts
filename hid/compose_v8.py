@@ -102,6 +102,7 @@ def render(calib_path, segment, src, out, start, dur, canvas_w=1080, extra=None)
     cmd += ["-ss", f"{max(0, start - 0.12):.3f}", "-i", src]
     cmd += ["-t", f"{dur + 0.12:.3f}", "-filter_complex", fc]
     cmd += ["-map", "[v]", "-map", "0:a?"]
+    cmd += ["-af", "loudnorm=I=-15.7:TP=-1.5:LRA=11"]  # playbook audio bar (pw8 delivery level)
     cmd += ["-c:v", "libx264", "-preset", "medium", "-crf", "19"]
     cmd += ["-c:a", "aac", "-b:a", "160k", out]
     if extra:
