@@ -18,7 +18,9 @@ HID = os.path.dirname(os.path.abspath(__file__))
 WIN = 50.0
 EXISTING_PICKS = [740, 1830, 1610, 2420, 1090, 5410, 5860, 5630, 5290, 5980]  # F-batch, global starts
 MIN_SEP_MIN = 2.5      # min separation between NEW candidates
-MIN_SEP_EXISTING = 1.5 # min separation from existing F picks (dedupe guard)
+MIN_SEP_EXISTING = 1.5 # min separation from existing picks (dedupe guard)
+# Existing-picks dedupe + VOD range: per-VOD via optional HID/base_picks.json
+# {"existing_picks": [..], "range": [min,max]} (legacy F-batch defaults preserved).
 
 def percentile(pct, vals):
     vals = sorted(vals)
@@ -30,6 +32,14 @@ def main():
     topn = int(sys.argv[1]) if len(sys.argv) > 1 else 8
     data = json.load(open(f'{HID}/baseline/signals.json'))
     wins = data['windows']
+    picksbase = f'{HID}/baseline/base_picks.json'
+    if os.path.exists(picksbase):
+        pb = json.load(open(picksbase))
+        EXISTING_PICKS = list(pb.get('existing_picks', []))
+        RANGE = pb.get('range', [120.0, data.get('vod_end', 10100.0) - 50.0])
+    else:
+        RANGE = [120.0, 10100.0]
+    gmin, gmax = RANGE
 
     # build percentile tables over usable audio windows
     usable = [w for w in wins if not w.get('audio_unavailable')]
@@ -41,7 +51,7 @@ def main():
     cands = []
     for w in wins:
         g = w['g_start']
-        if g < 120 or g > 10100:
+        if g < gmin or g > gmax:
             continue
         if any(abs(g - p) < MIN_SEP_EXISTING * 60 for p in EXISTING_PICKS):
             w['tag'] = 'near-existing-pick'
