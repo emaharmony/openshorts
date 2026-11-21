@@ -32,6 +32,12 @@ VOD_END = 10259.96
 WIN = 50.0
 RUNSPEC = _load_runspec()
 PARTS, VOD_END, RUN_VOD_ID, WIN = RUNSPEC
+RUNSPEC_TRANSCRIPTS = {}
+_rp = os.environ.get('HID_RUNSPEC') or (sys.argv[2] if len(sys.argv) > 2 else None)
+if _rp:
+    with open(_rp) as _fh:
+        _raw = json.load(_fh)
+    RUNSPEC_TRANSCRIPTS = {pid: pr.get('transcript') for pid, pr in _raw['parts'].items()}
 
 def _partition():
     """[(off, pid)] ascending; part boundaries from runspec offsets."""
@@ -95,10 +101,22 @@ def scene_events_global(thresh=0.06):
     return ev
 
 def transcript_windows():
-    sa = json.load(open(f'{W}/nw_meta_a.json'))['transcript']['segments']
-    sb = json.load(open(f'{W}/nw_meta_b.json'))['transcript']['segments']
-    segs = [(s['start'], s['end'], s['text']) for s in sa]
-    segs += [(s['start'] + 5130.0, s['end'] + 5130.0, s['text']) for s in sb]
+    """Reads whisper-output json(s). Legacy: W/nw_meta_{a,b}.json with part-B
+    offset. Runspec: {"parts": {"A": {"path","offset","transcript": path}}} —
+    each part may carry its own transcript file (same offset applied)."""
+    segs = []
+    if RUN_VOD_ID != '2923641711':
+        for pid, (pth, off) in PARTS.items():
+            tp = RUNSPEC_TRANSCRIPTS.get(pid)
+            if not tp:
+                continue
+            segs += [(s['start'] + off, s['end'] + off, s['text'])
+                     for s in json.load(open(tp))['transcript']['segments']]
+    else:
+        sa = json.load(open(f'{W}/nw_meta_a.json'))['transcript']['segments']
+        sb = json.load(open(f'{W}/nw_meta_b.json'))['transcript']['segments']
+        segs = [(s['start'], s['end'], s['text']) for s in sa]
+        segs += [(s['start'] + 5130.0, s['end'] + 5130.0, s['text']) for s in sb]
     segs.sort()
     return segs
 
