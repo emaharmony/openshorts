@@ -15,6 +15,7 @@ services:
       - UPLOAD_TTL_SECONDS=604800
       - OUTPUT_MAX_GB=0
       - UPLOADS_MAX_GB=0
+      - MAX_FILE_SIZE_MB=16384
     restart: unless-stopped
 
   frontend:
