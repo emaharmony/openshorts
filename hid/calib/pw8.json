@@ -1,0 +1,15 @@
+{
+  "name": "pw8",
+  "src_size": [1280, 720],
+  "segments": [{
+    "name": "TL",
+    "match": {"time_start": 0, "time_end": 15656.5},
+    "cam":  {"crop": [368, 233, 0, 8], "hflip": true, "band_h": 686},
+    "game": {"crop": [872, 610, 380, 40], "band_h": 756}
+  }, {
+    "name": "BR",
+    "match": {"time_start": 15656.5, "time_end": null},
+    "cam":  {"crop": [368, 207, 912, 449], "hflip": true, "band_h": 686},
+    "game": {"crop": [872, 610, 380, 40], "band_h": 756}
+  }]
+}

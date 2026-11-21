@@ -52,3 +52,10 @@ CLAUDE.local.md
 
 # Rust build output
 osrender/target/
+
+# HID per-VOD run state (paths live in the operator workspace, not the repo)
+hid/baseline/*.json
+!hid/baseline/.keep
+hid/qafixtures/*
+!hid/qafixtures/.keep
+hid/calib/f38.draft.json

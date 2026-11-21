@@ -1,0 +1,36 @@
+{
+ "name": "f38",
+ "src_size": [
+  1920,
+  1080
+ ],
+ "status": "calibrated-2026-11-21: 10/10 picks confirmed BL scene, cam 500-590px w, rail ~260-320px, borders 30-45px",
+ "segments": [
+  {
+   "name": "BL-f38",
+   "match": {
+    "time_start": 0,
+    "time_end": null
+   },
+   "cam": {
+    "crop": [
+     532,
+     348,
+     12,
+     655
+    ],
+    "hflip": true,
+    "band_h": 686
+   },
+   "game": {
+    "crop": [
+     1318,
+     950,
+     560,
+     30
+    ],
+    "band_h": 756
+   }
+  }
+ ]
+}

@@ -1,0 +1,16 @@
+{
+  "name": "f38",
+  "src_size": [1920, 1080],
+  "status": "DRAFT — from 7 vision probes 2026-11-21; verify per-pick before compose",
+  "segments": [{
+    "name": "BR-early",
+    "match": {"time_start": 0, "time_end": 900},
+    "cam":  {"crop": [630, 355, 1290, 725], "hflip": true},
+    "game": {"crop": [1560, 950, 250, 30]}
+  }, {
+    "name": "BL-main",
+    "match": {"time_start": 900, "time_end": null},
+    "cam":  {"crop": [526, 338, 0, 675], "hflip": true},
+    "game": {"crop": [1560, 950, 280, 30]}
+  }]
+}
