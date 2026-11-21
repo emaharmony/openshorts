@@ -33,10 +33,19 @@ WIN = 50.0
 RUNSPEC = _load_runspec()
 PARTS, VOD_END, RUN_VOD_ID, WIN = RUNSPEC
 
-def part_for(g):
-    if g < 5130.0: return 'A'
-    return 'B'
+def _partition():
+    """[(off, pid)] ascending; part boundaries from runspec offsets."""
+    l = sorted((off, pid) for pid, (_, off) in PARTS.items())
+    return l
 
+def part_for(g):
+    """Return the part pid whose [off, next_off) contains g (largest off wins past the last)."""
+    l = _partition()
+    best = l[-1][1]
+    for off, pid in l:
+        if g >= off:
+            best = pid
+    return best
 def local_of(g):
     return g - PARTS[part_for(g)][1]
 
