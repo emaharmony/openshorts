@@ -129,7 +129,7 @@ def main():
     args = ap.parse_args()
     calib = load_calib(args.calib)
     seg = next((s for s in calib["segments"] if s["name"] == args.segment), None)
-    if args.t is not None:
+    if getattr(args, 't', None) is not None:
         seg = pick_segment(calib, args.t)
     if args.cmd == "fc":
         fc, w, h = build_fc(seg, args.dur, args.canvas_w)
