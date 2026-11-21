@@ -84,8 +84,8 @@ def build_fc(seg, dur, canvas_w=1080, head_pad=0):
     fc = (
         f"color=black:s={canvas_w}x{total}:d={dur:.3f}:r=30[base];"
         f"[0:v]split=2[g0][c0];"
-        f"[c0]{hf}crop={cw}:{ch}:{cx}:{cy},scale={canvas_w}:{cam_h},setsar=1[cam];"
-        f"[g0]crop={gw}:{gh}:{gx}:{gy},scale={canvas_w}:{game_h},setsar=1[game];"
+        f"[c0]crop={cw}:{ch}:{cx}:{cy},{hf}scale={canvas_w}:{cam_h},setpts=PTS-STARTPTS,setsar=1[cam];"
+        f"[g0]crop={gw}:{gh}:{gx}:{gy},scale={canvas_w}:{game_h},setpts=PTS-STARTPTS,setsar=1[game];"
         f"[base][cam]overlay=x=0:y=0:shortest=1[v1];"
         f"[v1][game]overlay=x=0:y={cam_h}:shortest=1,setsar=1[v]"
     )
