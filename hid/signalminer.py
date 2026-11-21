@@ -15,9 +15,23 @@ import json, subprocess, re, os, sys
 
 W = os.environ.get('HID_WORK', os.path.dirname(os.path.abspath(__file__)))
 HID = os.path.dirname(os.path.abspath(__file__))
+# Runspec (per-VOD): json {"vod_id": str, "parts": {"A": {"path","offset"}...},
+# "vod_end": seconds, "win_seconds": 50}. Defaults preserve the legacy
+# 2923641711 two-part layout. Pass path via sys.argv[1] or HID_RUNSPEC env.
+def _load_runspec():
+    p = os.environ.get('HID_RUNSPEC') or (sys.argv[2] if len(sys.argv) > 2 else None)
+    if p:
+        with open(p) as fh:
+            r = json.load(fh)
+        parts = {pid: (pr['path'], float(pr['offset'])) for pid, pr in r['parts'].items()}
+        return parts, float(r['vod_end']), r.get('vod_id', 'custom'), float(r.get('win_seconds', WIN))
+    return (dict(PARTS), VOD_END, '2923641711', WIN)
+
 PARTS = {'A': (f'{W}/nw_a.mp4', 0.0), 'B': (f'{W}/nw_b.mp4', 5130.0)}
 VOD_END = 10259.96
 WIN = 50.0
+RUNSPEC = _load_runspec()
+PARTS, VOD_END, RUN_VOD_ID, WIN = RUNSPEC
 
 def part_for(g):
     if g < 5130.0: return 'A'
@@ -129,8 +143,8 @@ def main():
         windows.append(rec)
 
     os.makedirs(f'{HID}/baseline', exist_ok=True)
-    out = {'vod_id': '2923641711', 'win_seconds': WIN,
-           'offsets': {'partA': 0.0, 'partB': 5130.0}, 'windows': windows}
+    out = {'vod_id': RUN_VOD_ID, 'win_seconds': WIN,
+           'offsets': {pid: off for pid, (pth, off) in PARTS.items()}, 'windows': windows}
     json.dump(out, open(f'{HID}/baseline/signals.json', 'w'), indent=1)
     print(f"signals.json written: {len(windows)} windows; "
           f"audio-unavail={sum(1 for r in windows if r.get('audio_unavailable'))}, "
