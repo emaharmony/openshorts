@@ -1803,7 +1803,7 @@ def process_video_to_vertical(input_video, final_output_video, aspect_ratio=ASPE
             # through to v1 would quietly return an automatically framed clip,
             # and the user would see their correction vanish with no reason
             # given — so surface the failure instead of discarding their input.
-            if crop_overrides or force_strategy:
+            if crop_overrides or force_strategy or os.environ.get("FIXED_BAND_LAYOUT") == "1":
                 raise RuntimeError(
                     f"manual framing needs the v2 reframe engine, which failed "
                     f"({type(e).__name__}: {e})") from e
