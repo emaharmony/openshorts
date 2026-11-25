@@ -26,6 +26,7 @@ output/
 
 # Secrets
 .env
+docker-compose.local.yml
 
 # Generated metadata
 *_metadata.json

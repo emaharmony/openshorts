@@ -694,6 +694,31 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
         scenes = [(FrameTimecode(0, fps), FrameTimecode(total, fps))]
 
     scene_boundaries = [(s.get_frames(), e.get_frames()) for s, e in scenes]
+    if os.environ.get("FIXED_BAND_LAYOUT") == "1":
+        # The same detector is used for landscape and vertical sources. A
+        # missing or uncertain inset falls back to a fit of the whole source.
+        try:
+            inset = camera_inset.detect(input_video, fallback_box=inset_hint)
+        except Exception as exc:
+            print(f"   ⚠️ Inset check failed: {exc}; fitting the whole frame")
+            inset = None
+        print("   📹 Fixed band: camera detected" if inset else "   📹 Fixed band: no camera detected; fitting whole frame")
+        if inset:
+            graph = camera_inset.inset_filtergraph(orig_w, orig_h, out_w, out_h, inset, fixed=True)
+        else:
+            graph = (f"[0:v]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,"
+                     f"pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1[v]")
+        total_frames = max(end for _, end in scene_boundaries)
+        workdir = tempfile.mkdtemp(prefix="reframe_v2_")
+        try:
+            logo = m.watermark_logo_path() if watermark else None
+            encode_scenes(input_video, [(0, total_frames / fps, graph, None)],
+                          orig_w, orig_h, out_w, out_h, fps, workdir, logo, final_output_video)
+        finally:
+            import shutil
+            shutil.rmtree(workdir, ignore_errors=True)
+        layout_ranges.write(final_output_video, [(0, total_frames / fps, 'INSET' if inset else 'WIDE', None)])
+        return True
     # A source shot vertical is already the output: nothing to reframe. The
     # scene classifier still sends its face-less shots (a slide, a chart, a
     # screen recording) to GENERAL, and GENERAL on such a source shrank the

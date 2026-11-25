@@ -10,6 +10,8 @@ import shutil
 import glob
 import hashlib
 import hmac
+import stat
+import hmac
 import time
 import zipfile
 import math
@@ -43,7 +45,8 @@ from jsonfile import write_json_atomic
 load_dotenv()
 
 # Constants
-UPLOAD_DIR = "uploads"
+LEGACY_UPLOAD_DIR = "uploads"
+UPLOAD_DIR = os.environ.get("OPENSHORTS_UPLOAD_DIR") or LEGACY_UPLOAD_DIR
 OUTPUT_DIR = "output"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -499,6 +502,8 @@ def _apply_source_cut(env, partial):
 
 def _discard_rejected_source(input_path, job_output_dir, upload_slot=None, upload_id=None):
     """Undo what /api/process wrote to disk for a job that was refused."""
+    if upload_slot and upload_slot.get("local_readonly"):
+        input_path = None
     if input_path and os.path.exists(input_path):
         try:
             if upload_slot is not None and upload_id:
@@ -2357,15 +2362,23 @@ def _install_drain_signal_handler():
         print(f"⚠️ Drain-on-SIGTERM unavailable ({e}); jobs will resume on restart instead.")
 
 
+def _apply_fixed_band_policy(env):
+    env.update({"FIXED_BAND_LAYOUT": "1", "AUTO_CAPTIONS": "0", "AUTO_HOOK": "0",
+                "AUTO_LAYOUT": "0", "SKIP_SCREENCAST_MODEL": "1", "REFRAME_ENGINE": "v2",
+                "PRO_MODE": "off", "HOOK_GROUNDING": "0"})
+
+
 def _write_resume_manifest(job_id, cmd, priority, user_id, reservation_id, watermark,
                            webhook_url=None, webhook_secret=None, base_url=None,
                            partial=None, source_cap_minutes=None, skip_statics=False,
-                           via_api_key=False, lane=None, submitted_at=None, topup=False):
+                           via_api_key=False, lane=None, submitted_at=None, topup=False,
+                           fixed_band_policy=None):
     try:
         path = os.path.join(OUTPUT_DIR, job_id, _RESUME_FILE)
         # Atomic like every manifest write: the other instance reads them.
         write_json_atomic(path, {
                 "cmd": cmd, "priority": priority,
+                "fixed_band_policy": fixed_band_policy,
                 "user_id": None if user_id is None else str(user_id),
                 "reservation_id": reservation_id,
                 "watermark": bool(watermark), "attempts": 0,
@@ -2454,6 +2467,10 @@ def _resume_candidates(held: set, now: float):
         if not isinstance(m, dict):
             continue
 
+        # Preserve the durable record without retrying or incrementing attempts.
+        if "/data/original/source.mp4" in m.get("cmd", []):
+            continue
+
         if m.get("reservation_id"):
             keep_reservations.add(str(m["reservation_id"]))
         if job_id in held:
@@ -2518,6 +2535,11 @@ def _register_resumed(picked) -> int:
     directory listing gave."""
     resumed = 0
     for job_id, m in picked:
+        # A one-file mount may have been detached or rebound after interruption.
+        # Never restart such jobs automatically against an unverified original.
+        if "/data/original/source.mp4" in m.get("cmd", []):
+            print(f"Original-bound job {job_id} requires manual reconciliation")
+            continue
         if job_id in jobs:
             continue  # registered while the disk was being read
         user_id = m.get("user_id")
@@ -2527,6 +2549,12 @@ def _register_resumed(picked) -> int:
         # Rebuild env from scratch — the manifest holds no secrets. Managed
         # (cloud) jobs get the server key; self-host falls back to its env key.
         env = child_env()
+        policy = m.get("fixed_band_policy")
+        if policy not in (None, "v1"):
+            print(f"⚠️ Cannot resume {job_id}: unknown fixed-band policy")
+            continue
+        if policy == "v1":
+            _apply_fixed_band_policy(env)
         try:
             from cloud import proxy_ledger as _pl
             if BILLING_ENABLED and _pl.budget_exceeded_sync():
@@ -5533,7 +5561,7 @@ async def worker_source(job_id: str, request: Request):
     job_dir, data = _worker_job(request, job_id)
     source = data.get("source") if data.get("state") == remote_worker.READY else None
     real = os.path.realpath(source) if source else ""
-    roots = [os.path.realpath(job_dir), os.path.realpath(UPLOAD_DIR)]
+    roots = [os.path.realpath(job_dir), os.path.realpath(UPLOAD_DIR), os.path.realpath(LEGACY_UPLOAD_DIR), os.path.realpath(LOCAL_INBOX)]
     if not real or not any(real.startswith(r + os.sep) for r in roots) or not os.path.isfile(real):
         raise HTTPException(status_code=404, detail="Not found")
     remote_worker.touch_seen(job_dir)
@@ -5672,7 +5700,15 @@ PUBLIC_CONFIG_CACHE = "public, max-age=300"
 
 @app.get("/api/config")
 async def get_config(response: Response):
-    response.headers["Cache-Control"] = PUBLIC_CONFIG_CACHE
+    response.headers["Cache-Control"] = "no-store"
+    selector_ready = False
+    if not BILLING_ENABLED and llm_backend.active() and os.environ.get("OPENSHORTS_FIXED_BAND_AUTO") == "1":
+        try:
+            async with httpx.AsyncClient(timeout=3) as client:
+                models = (await client.get(llm_backend.base_url() + "/models")).json().get("data", [])
+            selector_ready = any(m.get("id") == llm_backend.model_name() for m in models)
+        except Exception:
+            pass
     return {
         "youtubeUrlEnabled": not DISABLE_YOUTUBE_URL,
         "billingEnabled": BILLING_ENABLED,
@@ -5681,6 +5717,9 @@ async def get_config(response: Response):
         # Self-host only: tells the dashboard the Gemini key is optional
         # because the moment picker runs on an OpenAI-compatible server.
         "localLlm": None if BILLING_ENABLED else llm_backend.describe(),
+        "fixedBandAuto": selector_ready,
+        "fixedBandPolicy": not BILLING_ENABLED and os.environ.get("OPENSHORTS_FIXED_BAND_AUTO") == "1",
+        "localIntake": not BILLING_ENABLED and os.environ.get("OPENSHORTS_LOCAL_INTAKE") == "1",
     }
 
 async def _probe_youtube_quality(url: str) -> dict:
@@ -5839,6 +5878,19 @@ LAYOUT_IMPLIES = {
 # process time so a leaked id cannot start a job on someone else's account.
 # --------------------------------------------------------------------------- #
 pending_uploads: Dict[str, Dict] = {}
+LOCAL_INBOX = "/data/local-inbox"
+LOCAL_INTAKE_TOKEN_FILE = "/run/openshorts-local-intake-token"
+
+
+def _authorize_local_intake(request):
+    try:
+        with open(LOCAL_INTAKE_TOKEN_FILE, encoding="ascii") as token_file:
+            expected = token_file.read(256).strip()
+        supplied = request.headers.get("x-openshorts-local-token", "")
+        if len(expected) != 64 or not hmac.compare_digest(expected, supplied):
+            raise ValueError("unauthorized")
+    except (OSError, ValueError):
+        raise HTTPException(status_code=404, detail="Not found")
 # Unconsumed slots are gone after this; a consumed one becomes the job's
 # input and follows the job's own retention instead.
 UPLOAD_TTL_SECONDS = int(os.environ.get("UPLOAD_TTL_SECONDS", str(6 * 3600)))
@@ -5846,6 +5898,66 @@ UPLOAD_TTL_SECONDS = int(os.environ.get("UPLOAD_TTL_SECONDS", str(6 * 3600)))
 
 def _upload_url_base(request):
     return os.environ.get("PUBLIC_API_URL", "").rstrip("/") or str(request.base_url).rstrip("/")
+
+
+def _inspect_local_handoff(capability, extension, expected_hash, expected_size, original=False):
+    if not re.fullmatch(r"[0-9a-f]{64}", capability or "") or extension not in (".mp4", ".mkv"):
+        raise ValueError("invalid capability")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_hash or "") or not isinstance(expected_size, int):
+        raise ValueError("invalid fingerprint")
+    if original and (os.environ.get("OPENSHORTS_ORIGINAL_INTAKE") != "1" or extension != ".mp4"):
+        raise ValueError("original intake unavailable")
+    path = "/data/original/source.mp4" if original else os.path.join(LOCAL_INBOX, capability + extension)
+    if original:
+        # A configured path alone is insufficient: require an exact, read-only
+        # mount, so a writable parent cannot expose the original to this service.
+        with open("/proc/self/mountinfo", encoding="utf-8") as mounts:
+            if not any(len(parts := line.split()) > 6 and parts[4] == path and "ro" in parts[5].split(",") for line in mounts):
+                raise ValueError("original must be an exact read-only mount")
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_size <= 0 or before.st_size != expected_size or before.st_size > MAX_FILE_SIZE_MB * 1024 * 1024:
+            raise ValueError("invalid source")
+        digest = hashlib.sha256()
+        with os.fdopen(fd, "rb", closefd=False) as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+        after = os.fstat(fd)
+        identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+        if identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) or digest.hexdigest() != expected_hash:
+            raise ValueError("source changed or fingerprint mismatch")
+        if os.stat(path, follow_symlinks=False).st_ino != before.st_ino:
+            raise ValueError("source changed")
+        return path, identity
+    finally:
+        os.close(fd)
+
+
+@app.post("/api/local-intake")
+async def local_intake(request: Request):
+    if BILLING_ENABLED or os.environ.get("OPENSHORTS_LOCAL_INTAKE") != "1":
+        raise HTTPException(status_code=404, detail="Not found")
+    _authorize_local_intake(request)
+    body = await request.json()
+    try:
+        original = body.get("original") is True
+        path, identity = await asyncio.to_thread(_inspect_local_handoff, body.get("capability"), body.get("extension"), body.get("sha256"), body.get("size"), original)
+    except (OSError, TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid local source")
+    claims_dir = os.path.join(UPLOAD_DIR, ".local-intake-claims")
+    os.makedirs(claims_dir, exist_ok=True)
+    claim = hashlib.sha256(body["capability"].encode("ascii")).hexdigest()
+    try:
+        fd = os.open(os.path.join(claims_dir, claim), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(fd)
+    except FileExistsError:
+        raise HTTPException(status_code=409, detail="Local source capability already used")
+    upload_id = str(uuid.uuid4())
+    pending_uploads[upload_id] = {"user_id": await _owner_id(request), "filename": "source" + body["extension"],
+                                  "path": path, "created": time.time(), "bytes": body["size"],
+                                  "complete": True, "local_readonly": True, "identity": identity, "sha256": body["sha256"]}
+    return {"upload_id": upload_id}
 
 
 @app.post("/api/uploads")
@@ -5907,6 +6019,8 @@ async def put_upload(upload_id: str, request: Request):
     if not slot or time.time() - slot["created"] > UPLOAD_TTL_SECONDS:
         pending_uploads.pop(upload_id, None)
         raise HTTPException(status_code=404, detail="Unknown or expired upload_id")
+    if slot.get("local_readonly"):
+        raise HTTPException(status_code=409, detail="Local source cannot be uploaded")
     limit_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
     size = 0
     with open(slot["path"], "wb") as out:
@@ -5936,9 +6050,12 @@ async def delete_upload(upload_id: str, request: Request):
     slot = pending_uploads.get(upload_id)
     if not slot or (BILLING_ENABLED and slot.get("user_id") != await _owner_id(request)):
         raise HTTPException(status_code=404, detail="Unknown or expired upload_id")
+    if slot.get("local_readonly"):
+        _authorize_local_intake(request)
     pending_uploads.pop(upload_id, None)
     try:
-        os.remove(slot["path"])
+        if not slot.get("local_readonly"):
+            os.remove(slot["path"])
     except OSError:
         pass
     return {"deleted": upload_id}
@@ -5953,7 +6070,8 @@ def _sweep_pending_uploads(now=None):
         if now - slot["created"] > UPLOAD_TTL_SECONDS:
             pending_uploads.pop(uid, None)
             try:
-                os.remove(slot["path"])
+                if not slot.get("local_readonly"):
+                    os.remove(slot["path"])
             except OSError:
                 pass
             gone.append(uid)
@@ -5963,7 +6081,7 @@ def _sweep_pending_uploads(now=None):
 def _take_pending_upload(upload_id, user_id):
     """The completed upload for this caller, or an HTTPException."""
     slot = pending_uploads.get(upload_id)
-    if not slot or (BILLING_ENABLED and slot.get("user_id") != user_id):
+    if not slot or time.time() - slot["created"] > UPLOAD_TTL_SECONDS or (BILLING_ENABLED and slot.get("user_id") != user_id):
         raise HTTPException(status_code=404, detail="Unknown or expired upload_id")
     if not slot.get("complete") or not os.path.exists(slot["path"]):
         raise HTTPException(status_code=409, detail="Upload not received yet: PUT the video to upload_url first")
@@ -6146,6 +6264,16 @@ async def process_endpoint(
     upload_slot = None
     if upload_id and not url and not file and not thumb_session:
         upload_slot = _take_pending_upload(upload_id, await _owner_id(request))
+        if upload_slot.get("local_readonly"):
+            _authorize_local_intake(request)
+            try:
+                st = os.stat(upload_slot["path"], follow_symlinks=False)
+                if not stat.S_ISREG(st.st_mode) or (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns) != upload_slot["identity"]:
+                    raise ValueError("source changed")
+            except (OSError, ValueError):
+                raise HTTPException(status_code=409, detail="Local source changed")
+            # Consume before any await: a local capability authorizes one job.
+            pending_uploads.pop(upload_id, None)
 
     if not url and not file and not thumb_session and not upload_slot:
         raise HTTPException(status_code=400, detail="Must provide URL, File or upload_id")
@@ -6310,6 +6438,10 @@ async def process_endpoint(
         print(f"[captions] job={job_id} auto-captions off")
     if selected_clips is not None:
         env["AUTO_HOOK"] = "0"
+    if not BILLING_ENABLED and os.environ.get("OPENSHORTS_FIXED_BAND_AUTO") == "1":
+        # Deployment-owned policy takes precedence over request layout fields.
+        _apply_fixed_band_policy(env)
+        output_format = "vertical"
 
     input_path = None
     if url:
@@ -6347,8 +6479,11 @@ async def process_endpoint(
         if MIN_SOURCE_SECONDS > 0 and 0 < src_duration < MIN_SOURCE_SECONDS:
             await asyncio.to_thread(_discard_rejected_source, None, job_output_dir)
             _reject_short_source(src_duration)
-        input_path = os.path.join(UPLOAD_DIR, f"{job_id}_{upload_slot['filename']}")
-        os.replace(src, input_path)
+        if upload_slot.get("local_readonly"):
+            input_path = src
+        else:
+            input_path = os.path.join(UPLOAD_DIR, f"{job_id}_{upload_slot['filename']}")
+            os.replace(src, input_path)
         pending_uploads.pop(upload_id, None)
         cmd.extend(["-i", input_path])
     else:
@@ -6402,7 +6537,7 @@ async def process_endpoint(
     if selected_clips is not None and partial:
         cap_seconds = float(partial["processed_minutes"]) * 60
         if any(clip["end"] > cap_seconds for clip in selected_clips):
-            if input_path and os.path.exists(input_path):
+            if input_path and not (upload_slot and upload_slot.get("local_readonly")) and os.path.exists(input_path):
                 os.remove(input_path)
             await _drop_unstarted_job(reservation_id, job_output_dir)
             raise HTTPException(
@@ -6494,6 +6629,12 @@ async def process_endpoint(
     }
     _end_job_dir(job_id)  # `jobs` keeps it live now
 
+    if upload_slot and upload_slot.get("local_readonly"):
+        index_dir = os.path.join(UPLOAD_DIR, ".local-source-index")
+        os.makedirs(index_dir, exist_ok=True)
+        write_json_atomic(os.path.join(index_dir, job_id + ".json"), {
+            "name": os.path.basename(input_path), "identity": upload_slot["identity"], "sha256": upload_slot["sha256"]})
+
     # Persist the owner so recovered jobs keep their multi-tenant guard after a
     # restart (see _recover_jobs_from_disk).
     if user_id is not None:
@@ -6513,7 +6654,8 @@ async def process_endpoint(
                            source_cap_minutes=source_cap, skip_statics=skip_statics,
                            via_api_key=jobs[job_id]['via_api_key'],
                            lane=jobs[job_id]['lane'], submitted_at=jobs[job_id]['submitted_at'],
-                           topup=jobs[job_id]['topup'])
+                           topup=jobs[job_id]['topup'],
+                           fixed_band_policy="v1" if env.get("FIXED_BAND_LAYOUT") == "1" else None)
 
     _enqueue_job(job_id, priority)
     if _saturation_on():
@@ -6804,12 +6946,26 @@ def _locate_source(job_id: str):
     the job dir (--keep-original) under the name recorded as ``source_video``
     in metadata.json. Either way it ages out with the normal retention caps.
     """
-    matches = [
-        f for f in glob.glob(os.path.join(UPLOAD_DIR, f"{glob.escape(job_id)}_*"))
-        if not os.path.basename(f).startswith("thumb_")
-    ]
-    if matches:
-        return matches[0]
+    if _is_uuid_id(job_id):
+        try:
+            with open(os.path.join(UPLOAD_DIR, ".local-source-index", job_id + ".json"), encoding="utf-8") as f:
+                entry = json.load(f)
+                name = entry.get("name", "")
+            if re.fullmatch(r"[0-9a-f]{64}\.(mp4|mkv)", name):
+                path = os.path.join(LOCAL_INBOX, name)
+                st = os.stat(path, follow_symlinks=False)
+                identity = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+                if stat.S_ISREG(st.st_mode) and tuple(entry.get("identity", ())) == identity:
+                    return path
+        except (OSError, ValueError, TypeError):
+            pass
+    for upload_dir in dict.fromkeys((UPLOAD_DIR, LEGACY_UPLOAD_DIR)):
+        matches = [
+            f for f in glob.glob(os.path.join(upload_dir, f"{glob.escape(job_id)}_*"))
+            if not os.path.basename(f).startswith("thumb_")
+        ]
+        if matches:
+            return matches[0]
     try:
         meta_files = glob.glob(os.path.join(OUTPUT_DIR, job_id, "*_metadata.json"))
         if meta_files:

@@ -518,7 +518,7 @@ def is_composite_column(box, orig_w, orig_h):
             and h >= 0.22 * orig_h)
 
 
-def inset_filtergraph(orig_w, orig_h, out_w, out_h, box, camera_ratio=None):
+def inset_filtergraph(orig_w, orig_h, out_w, out_h, box, camera_ratio=None, fixed=False):
     """Screen on top at full width, the webcam inset below.
 
     The screen keeps its whole width, which is the point: a game HUD or a
@@ -533,6 +533,25 @@ def inset_filtergraph(orig_w, orig_h, out_w, out_h, box, camera_ratio=None):
     at t=2614, with only 10-15px of chat text at the edge at t=702, covered
     by the +1%W margin). The screen keeps its whole width in both modes.
     """
+    if fixed:
+        # Fit the entire source in the upper band and the detected crop in the
+        # lower band; never crop or stretch the source to fill either band.
+        x, y, w, h = map(int, box)
+        pad_x, pad_y = max(2, w // 10), max(2, h // 10)
+        right, bottom = min(orig_w, x + w + pad_x), min(orig_h, y + h + pad_y)
+        x, y = max(0, x - pad_x), max(0, y - pad_y)
+        w, h = right - x, bottom - y
+        if w < 2 or h < 2:
+            raise ValueError("invalid inset box")
+        cam_h = max(2, int(out_h * .35) // 2 * 2)
+        top_h = out_h - cam_h
+        return (f"[0:v]split=2[whole][cam];"
+                f"[whole]scale={out_w}:{top_h}:force_original_aspect_ratio=decrease,"
+                f"pad={out_w}:{top_h}:(ow-iw)/2:(oh-ih)/2[upper];"
+                f"[cam]crop={w}:{h}:{x}:{y},"
+                f"scale={out_w}:{cam_h}:force_original_aspect_ratio=decrease,"
+                f"pad={out_w}:{cam_h}:(ow-iw)/2:(oh-ih)/2[lower];"
+                f"[upper][lower]vstack=inputs=2,setsar=1[v]")
     box_w = max(2, box[2])
     box_h = max(2, box[3])
     y0 = max(0, int(box[1]))  # body-growth clamp needs the box top
