@@ -1,0 +1,37 @@
+{
+ "vod_id": "1120-obs",
+ "source_resolution": [
+  1280,
+  720
+ ],
+ "canvas": [
+  1080,
+  1442
+ ],
+ "segments": [
+  {
+   "name": "STRIP-1120",
+   "note": "thin bottom-left letterbox cam strip (~510x90-130 at x35-545, y640-720); chat panel x0-405 top-left; game x545-1280",
+   "cam": {
+    "crop": [
+     306,
+     182,
+     168,
+     534
+    ],
+    "hflip": true
+   },
+   "game": {
+    "crop": [
+     730,
+     512,
+     550,
+     8
+    ],
+    "hflip": false
+   },
+   "cam_h": 686,
+   "game_h": 756
+  }
+ ]
+}
