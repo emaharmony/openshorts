@@ -19,7 +19,8 @@
      168,
      534
     ],
-    "hflip": true
+    "hflip": true,
+    "band_h": 686
    },
    "game": {
     "crop": [
@@ -28,10 +29,9 @@
      550,
      8
     ],
-    "hflip": false
-   },
-   "cam_h": 686,
-   "game_h": 756
+    "hflip": false,
+    "band_h": 756
+   }
   }
  ]
 }
